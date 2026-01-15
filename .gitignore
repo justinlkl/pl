@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Packaging/build artifacts
+*.egg-info/
+dist/
+build/
+
+# Model artifacts / outputs
+artifacts/
+outputs/
+
+# Local data repo clone (reproducible via git clone)
+FPL-Core-Insights/
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.vscode/
