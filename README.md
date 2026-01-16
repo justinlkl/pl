@@ -22,16 +22,23 @@ C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m pip install -r require
 C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m pip install -e .
 ```
 
+Optional (ensemble models):
+
+```powershell
+# Recommended in a Python 3.11/3.12 environment
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m pip install -r requirements-ensemble.txt
+```
+
 2) Train
 
 ```powershell
-C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m fpl_projection.train --season 2025-2026 --seq-length 5 --horizon 5
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m fpl_projection.train --season 2025-2026 --seq-length 5 --horizon 6
 ```
 
 3) Predict (writes a projection table)
 
 ```powershell
-C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m fpl_projection.predict --season 2025-2026 --horizon 5
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m fpl_projection.predict --season 2025-2026 --horizon 6
 ```
 
 Outputs:

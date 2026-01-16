@@ -1,0 +1,12 @@
+# Optional ensemble dependencies (PyCaret + tree models)
+#
+# Note: As of today, PyCaret's dependency constraints typically require
+# NumPy < 1.27, which does not provide prebuilt wheels for Python 3.13.
+# On Windows, that means installs on Python 3.13 often fail.
+#
+# Recommendation: use Python 3.11/3.12 for the ensemble environment.
+
+numpy<1.27; python_version < '3.13'
+pycaret==3.3.2; python_version < '3.13'
+lightgbm; python_version < '3.13'
+catboost; python_version < '3.13'

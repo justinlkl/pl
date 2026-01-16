@@ -32,6 +32,16 @@ def main() -> None:
     model = tf.keras.models.load_model(artifacts_dir / "model.keras")
     prep = PreprocessArtifacts.load(str(artifacts_dir / "preprocess.joblib"))
 
+    # Make horizon consistent with the loaded model.
+    # This avoids runtime errors if the artifacts were trained with a different horizon.
+    model_horizon = int(model.output_shape[-1])
+    if args.horizon != model_horizon:
+        print(
+            f"Warning: --horizon={args.horizon} but loaded model outputs horizon={model_horizon}. "
+            f"Using model horizon={model_horizon}."
+        )
+        args.horizon = model_horizon
+
     raw = load_premier_league_gameweek_stats(repo_root=repo_root, season=args.season)
 
     # Keep names for table, but select numeric columns for modeling.

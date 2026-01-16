@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .feature_engineering import engineer_all_features
+
 
 @dataclass(frozen=True)
 class DataPaths:
@@ -25,12 +27,20 @@ def _extract_gw_from_path(path: Path) -> int | None:
 
 
 def load_premier_league_gameweek_stats(
-    *, repo_root: Path, season: str
+    *, repo_root: Path, season: str, apply_feature_engineering: bool = True
 ) -> pd.DataFrame:
     """Load Premier League player_gameweek_stats.csv across all GW folders.
 
     Expected layout (from FPL-Core-Insights):
     data/<season>/By Tournament/Premier League/GW*/player_gameweek_stats.csv
+    
+    Args:
+        repo_root: Root directory of the repository
+        season: Season identifier (e.g., "2025-2026")
+        apply_feature_engineering: If True, apply all feature engineering transformations
+        
+    Returns:
+        DataFrame with loaded data and optionally engineered features
     """
 
     paths = DataPaths(repo_root=repo_root)
@@ -76,5 +86,10 @@ def load_premier_league_gameweek_stats(
     # Prefer web_name for display.
     if "web_name" not in all_df.columns:
         all_df["web_name"] = ""
+    
+    # Apply feature engineering if requested
+    if apply_feature_engineering:
+        all_df = engineer_all_features(all_df)
 
     return all_df
+

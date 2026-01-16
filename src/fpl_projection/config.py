@@ -1,55 +1,90 @@
 from __future__ import annotations
 
-# Curated feature set: performance + enhanced defensive/context metrics.
-# You can tune this list, but keep it stable between training and prediction.
-DEFAULT_FEATURE_COLUMNS: list[str] = [
-    # Availability / price / selection context
+"""Project configuration.
+
+This repository uses the FPL-Core-Insights `player_gameweek_stats.csv` schema.
+The recommended feature set below is mapped to the column names that actually
+exist in that dataset.
+"""
+
+# ============================================================================
+# RECOMMENDED CORE TRAINING SET FOR FPL ML
+# ============================================================================
+
+# Core Predictors: essential player & context metrics.
+CORE_PREDICTORS: list[str] = [
+    # Price/value context
     "now_cost",
-    "selected_by_percent",
-    "transfers_in_event",
-    "transfers_out_event",
-    "chance_of_playing_next_round",
-    "form",
-    "points_per_game",
-    "ep_next",
+    # FPL dataset already provides value metrics; treat value_season as the primary "value".
+    "value_season",
 
-    # Core match returns
+    # Availability
     "minutes",
-    "goals_scored",
-    "assists",
-    "clean_sheets",
-    "goals_conceded",
-    "yellow_cards",
-    "red_cards",
-    "bonus",
-    "bps",
+    "starts",  # maps to "games_started"
+    # Engineered in feature_engineering.py
+    "minutes_per_start",
 
-    # Advanced / expected
+    # Expected rates already available in the dataset
+    "expected_goals_per_90",
+    "expected_assists_per_90",
+    "expected_goal_involvements_per_90",
+    "expected_goals_conceded_per_90",
+
+    # Expected totals
     "expected_goals",
     "expected_assists",
     "expected_goal_involvements",
     "expected_goals_conceded",
 
-    # ICT
+    # ICT + form
+    "ict_index",
     "influence",
     "creativity",
     "threat",
-    "ict_index",
-
-    # Enhanced defensive & contextual metrics
-    "tackles",
-    "clearances_blocks_interceptions",
-    "recoveries",
-    "defensive_contribution",
-    "defensive_contribution_per_90",
-    "starts_per_90",
+    "form",
 ]
 
+# Performance Enhancers: Advanced defensive & efficiency metrics
+PERFORMANCE_ENHANCERS: list[str] = [
+    "defcon_per_90",
+    "cbi_per_90",
+    "tackles_per_90",
+    "cbit_per_90",
+    "gi_minus_xgi",
+    "xgi_overperformance",
+    "xgi_underperformance",
+    "goals_minus_xg",
+    "assists_minus_xa",
+    "goal_involvements",
+]
+
+# Rolling & Cumulative Features (calculated during preprocessing, train-only)
+ROLLING_FEATURES: list[str] = [
+    "rolling_3_xg",       # 3-game rolling xG
+    "rolling_3_xa",       # 3-game rolling xA
+    "rolling_3_xgi",      # 3-game rolling xGI
+    "rolling_5_points",   # 5-game rolling points
+    "rolling_5_minutes",  # 5-game rolling minutes
+    "rolling_5_defensive",  # 5-game rolling defensive actions
+]
+
+# Cumulative Features (calculated during preprocessing, train-only)
+CUMULATIVE_FEATURES: list[str] = [
+    "cumulative_xg",      # Season cumulative xG
+    "cumulative_xa",      # Season cumulative xA
+    "cumulative_xgi",     # Season cumulative xGI
+]
+
+# Complete training feature set
+DEFAULT_FEATURE_COLUMNS: list[str] = CORE_PREDICTORS + PERFORMANCE_ENHANCERS + ROLLING_FEATURES + CUMULATIVE_FEATURES
+
+# Target variable: Points scored in the gameweek
 TARGET_COLUMN = "total_points"
 
-DEFAULT_SEQ_LENGTH = 5
-DEFAULT_HORIZON = 5
+# Sequence/Temporal Parameters
+DEFAULT_SEQ_LENGTH = 5  # Look back 5 gameweeks
+DEFAULT_HORIZON = 6  # Predict next 6 gameweeks
 
-# Split by sequence end gameweek (time-based split).
-DEFAULT_VAL_GWS = 3
-DEFAULT_TEST_GWS = 3
+# Train/Val/Test Split Parameters (by gameweek)
+DEFAULT_VAL_GWS = 3    # Last 3 gameweeks for validation
+DEFAULT_TEST_GWS = 3   # Last 3 gameweeks for testing
