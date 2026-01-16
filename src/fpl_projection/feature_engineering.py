@@ -13,6 +13,66 @@ import pandas as pd
 import numpy as np
 
 
+def calculate_position_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add simple one-hot position flags when `position` is available.
+
+    FPL-Core-Insights provides `position` in the season-level players.csv, which we
+    merge into the per-GW stats in data_loading.py.
+    """
+    df = df.copy()
+    pos = df.get("position")
+    if pos is None:
+        df["pos_gk"] = 0.0
+        df["pos_def"] = 0.0
+        df["pos_mid"] = 0.0
+        df["pos_fwd"] = 0.0
+        return df
+
+    pos_norm = pos.astype(str).str.strip().str.lower()
+    df["pos_gk"] = pos_norm.isin(["goalkeeper", "gk"]).astype(float)
+    df["pos_def"] = pos_norm.isin(["defender", "def", "df"]).astype(float)
+    df["pos_mid"] = pos_norm.isin(["midfielder", "mid", "mf"]).astype(float)
+    df["pos_fwd"] = pos_norm.isin(["forward", "fwd", "fw", "striker"]).astype(float)
+    return df
+
+
+def calculate_defensive_contribution_points(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute FPL 2025/26 Defensive Contributions *points* (0 or 2) with cap.
+
+    Official rules (2025/26):
+    - DEF: 2 pts for 10+ CBIT
+    - MID/FWD: 2 pts for 12+ CBIRT
+    - Cap: 2 pts per match
+
+    The dataset often includes a `defensive_contribution` count already (from the
+    official API). We convert actions -> points to prevent the model from over-weighting
+    raw action volume beyond the scoring cap.
+    """
+    df = df.copy()
+
+    # Best-effort actions count
+    if "defensive_contribution" in df.columns:
+        actions = pd.to_numeric(df["defensive_contribution"], errors="coerce").fillna(0.0)
+    else:
+        tackles = pd.to_numeric(df.get("tackles", 0), errors="coerce").fillna(0.0)
+        cbi = pd.to_numeric(df.get("clearances_blocks_interceptions", 0), errors="coerce").fillna(0.0)
+        recoveries = pd.to_numeric(df.get("recoveries", 0), errors="coerce").fillna(0.0)
+        actions = tackles + cbi + recoveries
+
+    # Position-aware threshold
+    pos_norm = df.get("position", pd.Series(["" for _ in range(len(df))])).astype(str).str.strip().str.lower()
+    is_gk = pos_norm.isin(["goalkeeper", "gk"])
+    is_def = pos_norm.isin(["defender", "def", "df"])
+    is_mid_fwd = ~(is_gk | is_def)
+
+    # GK are not listed as eligible in the provided rules.
+    threshold = np.where(is_def.to_numpy(), 10.0, np.where(is_mid_fwd.to_numpy(), 12.0, np.inf))
+
+    df["defcon_actions"] = actions
+    df["defcon_points"] = ((actions.to_numpy() >= threshold) & np.isfinite(threshold)).astype(float) * 2.0
+    return df
+
+
 def calculate_per_90_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate/normalize per-90-minute metrics used by the model.
 
@@ -37,12 +97,14 @@ def calculate_per_90_metrics(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["cbi_per_90"] = 0.0
     
-    # Defensive combined metric per 90
-    if "tackles" in df.columns and "clearances_blocks_interceptions" in df.columns:
+    # Defensive actions per 90 (kept for context, but prefer capped defcon_points in modeling)
+    if "defcon_actions" in df.columns:
+        df["defcon_actions_per_90"] = pd.to_numeric(df["defcon_actions"], errors="coerce").fillna(0.0) / minutes_per_90
+    elif "tackles" in df.columns and "clearances_blocks_interceptions" in df.columns:
         def_total = df["tackles"].fillna(0) + df["clearances_blocks_interceptions"].fillna(0)
-        df["defcon_per_90"] = def_total / minutes_per_90
+        df["defcon_actions_per_90"] = def_total / minutes_per_90
     else:
-        df["defcon_per_90"] = 0.0
+        df["defcon_actions_per_90"] = 0.0
     
     # Combined tackles + cbi per 90
     if "tackles" in df.columns and "clearances_blocks_interceptions" in df.columns:
@@ -234,7 +296,9 @@ def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["player_id", "gw"]).reset_index(drop=True)
     
     # Apply transformations in sequence
+    df = calculate_position_features(df)
     df = calculate_availability_features(df)
+    df = calculate_defensive_contribution_points(df)
     df = calculate_per_90_metrics(df)
     df = calculate_performance_vs_expectation(df)
     df = calculate_rolling_features(df, windows=[3, 5])

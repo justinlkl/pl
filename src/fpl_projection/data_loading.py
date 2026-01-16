@@ -83,6 +83,24 @@ def load_premier_league_gameweek_stats(
     all_df["player_id"] = all_df["player_id"].astype(int)
     all_df["gw"] = all_df["gw"].astype(int)
 
+    # Attach season-level player metadata (position, team_code, etc.)
+    # This lives at: data/<season>/players.csv
+    try:
+        players_path = paths.insights_data_root / season / "players.csv"
+        if players_path.exists():
+            players = pd.read_csv(players_path)
+            if "player_id" in players.columns:
+                players["player_id"] = pd.to_numeric(players["player_id"], errors="coerce").astype("Int64")
+                players = players.dropna(subset=["player_id"]).copy()
+                players["player_id"] = players["player_id"].astype(int)
+                # Avoid bringing duplicated name columns over gameweek stats.
+                keep_cols = [c for c in players.columns if c not in {"first_name", "second_name", "web_name"}]
+                players = players[keep_cols].drop_duplicates(subset=["player_id"])
+                all_df = all_df.merge(players, on="player_id", how="left")
+    except Exception:
+        # Metadata enrich is best-effort; core stats can still load without it.
+        pass
+
     # Prefer web_name for display.
     if "web_name" not in all_df.columns:
         all_df["web_name"] = ""

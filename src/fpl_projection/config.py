@@ -42,14 +42,21 @@ CORE_PREDICTORS: list[str] = [
     "creativity",
     "threat",
     "form",
+
+    # Position flags (engineered from season players.csv metadata)
+    "pos_gk",
+    "pos_def",
+    "pos_mid",
+    "pos_fwd",
 ]
 
 # Performance Enhancers: Advanced defensive & efficiency metrics
 PERFORMANCE_ENHANCERS: list[str] = [
-    "defcon_per_90",
+    # Align with FPL 2025/26 scoring cap for defensive contributions
+    "defcon_points",
+    "defcon_actions_per_90",
     "cbi_per_90",
     "tackles_per_90",
-    "cbit_per_90",
     "gi_minus_xgi",
     "xgi_overperformance",
     "xgi_underperformance",
