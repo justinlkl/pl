@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,16 @@ def _require_pycaret() -> None:
     try:
         import pycaret  # noqa: F401
     except Exception as exc:  # pragma: no cover
+        if sys.version_info >= (3, 12):
+            raise SystemExit(
+                "PyCaret does not support Python 3.12+ in this setup.\n"
+                "Use a Python 3.11 environment for ensemble predictions.\n\n"
+                "Conda example:\n"
+                "  conda create -n fpl311 python=3.11 -y\n"
+                "  conda run -n fpl311 python -m pip install -r requirements-ensemble.txt\n"
+                "  conda run -n fpl311 python -m pip install -e .\n\n"
+                f"Original import error: {exc}"
+            )
         raise SystemExit(
             "PyCaret is not installed in this environment.\n"
             "Install the ensemble dependencies, then re-run:\n\n"
@@ -36,12 +47,19 @@ def main() -> None:
     parser.add_argument("--seq-length", type=int, default=DEFAULT_SEQ_LENGTH)
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
 
+    parser.add_argument(
+        "--lstm-only",
+        action="store_true",
+        help="Skip PyCaret stacked models and output raw LSTM horizon predictions.",
+    )
+
     parser.add_argument("--ensemble-dir", default=None, help="Directory containing lstm_model.keras, preprocess.joblib, stack_h*.pkl")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
-    _require_pycaret()
-    from pycaret.regression import load_model, predict_model  # type: ignore
+    if not args.lstm_only:
+        _require_pycaret()
+        from pycaret.regression import load_model, predict_model  # type: ignore
 
     repo_root = Path(args.repo_root)
     ensemble_dir = Path(args.ensemble_dir) if args.ensemble_dir else (repo_root / "artifacts" / "ensemble")
@@ -49,6 +67,11 @@ def main() -> None:
     outputs_dir = repo_root / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     output_path = Path(args.output) if args.output else (outputs_dir / "ensemble_projections.csv")
+
+    # If the user passes a custom output path (often relative like "outputs/foo.csv"),
+    # ensure its parent directory exists.
+    if output_path.parent != Path("."):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Load LSTM + preprocessing
     lstm = tf.keras.models.load_model(str(ensemble_dir / "lstm_model.keras"))
@@ -97,18 +120,26 @@ def main() -> None:
 
     lstm_preds = lstm.predict(X, verbose=0)
 
-    # Build per-horizon stacked predictions.
     out = pd.DataFrame(rows)
 
-    for i, gw in enumerate(next_gws, start=1):
-        stack = load_model(str(ensemble_dir / f"stack_h{i}"))
+    # If stacked models are not available (or user requested), fall back to LSTM-only projections.
+    have_all_stacks = all((ensemble_dir / f"stack_h{i}.pkl").exists() or (ensemble_dir / f"stack_h{i}").exists() for i in range(1, args.horizon + 1))
+    if args.lstm_only or not have_all_stacks:
+        if not args.lstm_only:
+            print("Warning: stacked models not found; falling back to LSTM-only projections.")
+        for i, gw in enumerate(next_gws, start=1):
+            out[f"GW{gw}_proj_points"] = lstm_preds[:, i - 1]
+    else:
+        # Build per-horizon stacked predictions.
+        for i, gw in enumerate(next_gws, start=1):
+            stack = load_model(str(ensemble_dir / f"stack_h{i}"))
 
-        # Build a minimal tabular row for predict_model: last-timestep engineered features + lstm_pred_hi
-        tab = pd.DataFrame(last_feature_rows, columns=prep.feature_columns)
-        tab[f"lstm_pred_h{i}"] = lstm_preds[:, i - 1]
+            # Build a minimal tabular row for predict_model: last-timestep engineered features + lstm_pred_hi
+            tab = pd.DataFrame(last_feature_rows, columns=prep.feature_columns)
+            tab[f"lstm_pred_h{i}"] = lstm_preds[:, i - 1]
 
-        pred_df = predict_model(stack, data=tab)
-        out[f"GW{gw}_proj_points"] = pred_df["prediction_label"].to_numpy(dtype=float)
+            pred_df = predict_model(stack, data=tab)
+            out[f"GW{gw}_proj_points"] = pred_df["prediction_label"].to_numpy(dtype=float)
 
     out = out.sort_values(f"GW{next_gws[0]}_proj_points", ascending=False).reset_index(drop=True)
     out.to_csv(output_path, index=False)

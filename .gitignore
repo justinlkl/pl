@@ -13,6 +13,10 @@ build/
 artifacts/
 outputs/
 
+# Training byproducts
+catboost_info/
+logs.log
+
 # Local data repo clone (reproducible via git clone)
 FPL-Core-Insights/
 

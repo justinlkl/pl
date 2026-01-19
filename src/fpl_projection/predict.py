@@ -29,6 +29,9 @@ def main() -> None:
 
     output_path = Path(args.output) if args.output else (outputs_dir / "projections.csv")
 
+    if output_path.parent != Path("."):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
     model = tf.keras.models.load_model(artifacts_dir / "model.keras")
     prep = PreprocessArtifacts.load(str(artifacts_dir / "preprocess.joblib"))
 

@@ -66,19 +66,26 @@ def main() -> None:
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
     parser.add_argument("--folds", type=int, default=5)
 
+    parser.add_argument(
+        "--lstm-only",
+        action="store_true",
+        help="Train and save only the LSTM + preprocessing artifacts (skip PyCaret stacking).",
+    )
+
     parser.add_argument("--artifacts-dir", default=None)
     parser.add_argument("--out-dir", default=None)
     args = parser.parse_args()
 
-    _require_pycaret()
-    from pycaret.regression import (  # type: ignore
-        create_model,
-        finalize_model,
-        predict_model,
-        save_model,
-        setup,
-        stack_models,
-    )
+    if not args.lstm_only:
+        _require_pycaret()
+        from pycaret.regression import (  # type: ignore
+            create_model,
+            finalize_model,
+            predict_model,
+            save_model,
+            setup,
+            stack_models,
+        )
 
     _set_seed(args.seed)
 
@@ -143,6 +150,11 @@ def main() -> None:
     (out_dir / "lstm_model.keras").parent.mkdir(parents=True, exist_ok=True)
     lstm.save(str(out_dir / "lstm_model.keras"))
     PreprocessArtifacts(feature_columns=feature_columns, pipeline=pipeline).save(str(out_dir / "preprocess.joblib"))
+
+    if args.lstm_only:
+        print(f"\nSaved LSTM-only artifacts to: {out_dir}")
+        print("Skipping PyCaret stacking (Phase B) because --lstm-only was set.")
+        return
 
     # Build LSTM predictions for ALL sequence samples (train+val+test) to feed Phase B.
     print("Generating LSTM predictions for stacking features...")
