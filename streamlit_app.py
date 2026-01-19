@@ -92,6 +92,7 @@ OUTPUTS = Path("outputs")
 PROJ_JSON = DATA / "projections.json"
 PROJ_CSV_FALLBACK = DATA / "projections.csv"
 PROJ_CSV = OUTPUTS / "projections.csv"
+PROJ_CSV_INTERNAL = OUTPUTS / "projections_internal.csv"
 
 FIXTURES_JSON = DATA / "fixtures.json"
 
@@ -1190,6 +1191,8 @@ def _can_add_player(team_df: pd.DataFrame, p: pd.Series) -> tuple[bool, str]:
 
 def load_projections() -> pd.DataFrame:
     # Prefer outputs/projections.csv (your model output)
+    if PROJ_CSV_INTERNAL.exists():
+        return load_csv(PROJ_CSV_INTERNAL)
     if PROJ_CSV.exists():
         return load_csv(PROJ_CSV)
     if PROJ_JSON.exists():

@@ -1,0 +1,52 @@
+:root {
+  --fdr-1: #0f9d58;
+  --fdr-2: #34a853;
+  --fdr-3: #9aa0a6;
+  --fdr-4: #fbbc05;
+  --fdr-5: #ea4335;
+}
+
+.fdr {
+  display: inline-block;
+  min-width: 34px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #fff;
+}
+.fdr-1 { background: var(--fdr-1); }
+.fdr-2 { background: var(--fdr-2); }
+.fdr-3 { background: var(--fdr-3); }
+.fdr-4 { background: var(--fdr-4); color: #111; }
+.fdr-5 { background: var(--fdr-5); }
+
+.small-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.formation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+@media (min-width: 992px) {
+  .formation-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.slot {
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 12px;
+  padding: 10px;
+  background: #fff;
+}
+
+.slot-empty {
+  background: #fbfbfb;
+  color: #777;
+}

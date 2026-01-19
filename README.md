@@ -46,6 +46,38 @@ Outputs:
 - `artifacts/preprocess.joblib`
 - `outputs/projections.csv`
 
+## Static UI (site)
+
+This repo now also includes a no-build-step static UI (React via CDN + Bootstrap), similar to your previous `fpl/site` setup.
+
+1) Generate site data from the latest projection output:
+
+```powershell
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe scripts/generate_site.py
+```
+
+2) Serve the site locally:
+
+```powershell
+Set-Location c:\Users\justinlam\Desktop\pl\site
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m http.server 8000 --bind 127.0.0.1
+```
+
+Open: http://127.0.0.1:8000
+
+## Optional: team storage API (site_api)
+
+If you want to persist saved teams (instead of keeping them in browser memory), run the FastAPI backend:
+
+```powershell
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m pip install -r site_api/requirements.txt
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m uvicorn site_api.app:app --reload --port 8080
+```
+
+Endpoints:
+- `GET /team/{user_id}`
+- `POST /team` with JSON `{ "user_id": "...", "team": [...] }`
+
 ## Notes
 
 - The model predicts points purely from historical player/gameweek stats (plus context columns present in the dataset). It does not simulate future fixtures unless those fixture-context columns are present in the data.

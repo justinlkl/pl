@@ -20,6 +20,9 @@ logs.log
 # Local data repo clone (reproducible via git clone)
 FPL-Core-Insights/
 
+# Local API storage (runtime state)
+site_api/site_data/
+
 # OS/Editor
 .DS_Store
 Thumbs.db
