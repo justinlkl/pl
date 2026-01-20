@@ -13,6 +13,57 @@ from .modeling import build_lstm_model
 from .preprocessing import PreprocessArtifacts, fit_preprocessor_on_timesteps, select_and_coerce_numeric, transform_sequences
 from .sequences import build_sequences, split_by_end_gw
 from .role_modeling import build_feature_weight_vector, infer_role_from_window, position_to_role
+from .role_modeling import role_loss_weight
+
+
+def _xgi_cap_from_raw_sequences(
+    X_raw: np.ndarray,
+    roles: np.ndarray,
+    *,
+    feature_columns: list[str],
+) -> np.ndarray:
+    idx = {c: i for i, c in enumerate(feature_columns)}
+    minutes_i = idx.get("minutes")
+    xgi90_i = idx.get("expected_goal_involvements_per_90")
+    xg90_i = idx.get("expected_goals_per_90")
+    xa90_i = idx.get("expected_assists_per_90")
+
+    goal_pts = {
+        "FWD": 4.0,
+        "MID": 5.0,
+        "MID_AM": 5.0,
+        "MID_DM": 5.0,
+        "DEF": 6.0,
+        "GK": 6.0,
+    }
+
+    caps: list[float] = []
+    for i in range(X_raw.shape[0]):
+        last = X_raw[i, -1, :]
+        minutes = float(last[minutes_i]) if minutes_i is not None else 90.0
+        minutes = float(np.nan_to_num(minutes, nan=0.0))
+        p60 = float(np.clip(minutes / 60.0, 0.0, 1.0))
+        m90 = float(np.clip(minutes / 90.0, 0.0, 1.0))
+
+        if xgi90_i is not None:
+            xgi90 = float(last[xgi90_i])
+        else:
+            xg90 = float(last[xg90_i]) if xg90_i is not None else 0.0
+            xa90 = float(last[xa90_i]) if xa90_i is not None else 0.0
+            xgi90 = xg90 + xa90
+        xgi90 = float(np.nan_to_num(xgi90, nan=0.0))
+        xgi = max(xgi90, 0.0) * m90
+
+        role = str(roles[i] if i < len(roles) else "").strip()
+        gpts = float(goal_pts.get(role, 5.0))
+        rate = 0.6 * gpts + 0.4 * 3.0
+
+        cap = 2.0 * p60 + rate * xgi
+        if role in {"DEF", "GK"}:
+            cap += 0.8 * p60
+        caps.append(float(max(cap, 0.0)))
+
+    return np.asarray(caps, dtype=float)
 
 
 def _require_pycaret() -> None:
@@ -68,6 +119,26 @@ def main() -> None:
         "--target",
         default=TARGET_COLUMN,
         help="Training target column (e.g., total_points or xp_proxy).",
+    )
+
+    parser.add_argument(
+        "--no-role-loss-weighting",
+        action="store_true",
+        help="Disable per-role loss weighting (sample_weight) during LSTM training.",
+    )
+
+    parser.add_argument(
+        "--bias-penalty-alpha",
+        type=float,
+        default=0.0,
+        help="Add alpha * ReLU(pred - xGI_cap) penalty to discourage overpredicting low-xGI players (0 disables).",
+    )
+
+    parser.add_argument(
+        "--monitor",
+        choices=["val_loss", "val_macro_mse"],
+        default="val_macro_mse",
+        help="Early stopping / LR scheduling monitor for LSTM training.",
     )
 
     parser.add_argument(
@@ -193,16 +264,89 @@ def main() -> None:
     X_val = _apply_role_weights(X_val, val_roles)
     X_test = _apply_role_weights(X_test, test_roles)
 
+    # Role-weighted loss: attacker errors matter more; MID-DM stability matters less.
+    if not bool(args.no_role_loss_weighting):
+        sw_train = np.asarray([role_loss_weight(r) for r in train_roles], dtype=float)
+        sw_val = np.asarray([role_loss_weight(r) for r in val_roles], dtype=float)
+    else:
+        sw_train = None
+        sw_val = None
+
+    use_bias_penalty = float(args.bias_penalty_alpha) > 0.0
+    if use_bias_penalty:
+        cap_train = _xgi_cap_from_raw_sequences(train_ds.X, train_roles, feature_columns=feature_columns)
+        cap_val = _xgi_cap_from_raw_sequences(val_ds.X, val_roles, feature_columns=feature_columns)
+        cap_train = np.repeat(cap_train.reshape(-1, 1), args.horizon, axis=1)
+        cap_val = np.repeat(cap_val.reshape(-1, 1), args.horizon, axis=1)
+        y_train = np.stack([train_ds.y, cap_train], axis=-1)
+        y_val = np.stack([val_ds.y, cap_val], axis=-1)
+    else:
+        y_train = train_ds.y
+        y_val = val_ds.y
+
     print("Training LSTM (Phase A)...")
     lstm = build_lstm_model(seq_length=args.seq_length, num_features=n_features, horizon=args.horizon)
+
+    if use_bias_penalty:
+        alpha = float(args.bias_penalty_alpha)
+
+        def _loss(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+            y = y_true[..., 0]
+            cap = y_true[..., 1]
+            mse = tf.reduce_mean(tf.square(y_pred - y), axis=-1)
+            penalty = tf.reduce_mean(tf.nn.relu(y_pred - cap), axis=-1)
+            return mse + alpha * penalty
+
+        def _mae(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
+            y = y_true[..., 0]
+            return tf.reduce_mean(tf.abs(y_pred - y), axis=-1)
+
+        lstm.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+            loss=_loss,
+            metrics=[tf.keras.metrics.MeanMetricWrapper(_mae, name="mae")],
+        )
+
+    class _PerRoleValMetrics(tf.keras.callbacks.Callback):
+        def __init__(self, Xv: np.ndarray, yv: np.ndarray, roles_v: np.ndarray):
+            super().__init__()
+            self.Xv = Xv
+            self.yv = yv
+            self.roles_v = np.asarray(roles_v, dtype=object)
+
+        def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+            logs = logs or {}
+            pred = self.model.predict(self.Xv, verbose=0)
+
+            if self.yv.ndim == 3 and self.yv.shape[-1] >= 1:
+                y_true = self.yv[..., 0]
+            else:
+                y_true = self.yv
+
+            per_role: dict[str, float] = {}
+            for r in sorted(set(str(v) for v in np.unique(self.roles_v))):
+                m = self.roles_v == r
+                if not np.any(m):
+                    continue
+                err = pred[m] - y_true[m]
+                per_role[r] = float(np.mean(np.square(err)))
+
+            if per_role:
+                logs["val_macro_mse"] = float(np.mean(list(per_role.values())))
+                for r, v in per_role.items():
+                    logs[f"val_mse_{r}"] = float(v)
+
+    monitor = str(args.monitor)
     callbacks = [
-        tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-6),
+        _PerRoleValMetrics(X_val, y_val, val_roles),
+        tf.keras.callbacks.EarlyStopping(monitor=monitor, patience=8, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=4, min_lr=1e-6),
     ]
     lstm.fit(
         X_train,
-        train_ds.y,
-        validation_data=(X_val, val_ds.y),
+        y_train,
+        sample_weight=sw_train,
+        validation_data=(X_val, y_val, sw_val) if sw_val is not None else (X_val, y_val),
         epochs=args.epochs,
         batch_size=args.batch_size,
         callbacks=callbacks,

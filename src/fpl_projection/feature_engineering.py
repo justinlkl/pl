@@ -281,6 +281,15 @@ def calculate_expected_points_proxy(df: pd.DataFrame) -> pd.DataFrame:
         + gc_penalty
     )
 
+    # Optional smoothed target that retains some realized signal.
+    # Useful when training a model that should still respect true outcomes,
+    # but not overfit to high-variance events (pens, VAR, BPS spikes, etc.).
+    if "total_points" in df.columns:
+        tp = pd.to_numeric(df.get("total_points", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        df["xp_blend"] = 0.7 * df["xp_proxy"].to_numpy(dtype=float) + 0.3 * tp
+    else:
+        df["xp_blend"] = df["xp_proxy"]
+
     return df
 
 

@@ -27,6 +27,28 @@ ROLE_PROJECTION_MULTIPLIER: dict[str, float] = {
 }
 
 
+# Role-aware loss weights (applied during training via per-sample `sample_weight`).
+# Principle: punish attacker mispredictions more; suppress MID-DM stability from dominating.
+ROLE_LOSS_WEIGHTS: dict[str, float] = {
+    ROLE_FWD: 1.35,
+    ROLE_MID_AM: 1.25,
+    ROLE_MID: 1.05,
+    ROLE_MID_DM: 0.55,
+    ROLE_DEF: 0.95,
+    ROLE_GK: 0.85,
+}
+
+
+def role_loss_weight(role: Any, *, overrides: dict[str, float] | None = None) -> float:
+    r = str(role or "").strip()
+    if overrides and r in overrides:
+        try:
+            return float(overrides[r])
+        except Exception:
+            return 1.0
+    return float(ROLE_LOSS_WEIGHTS.get(r, 1.0))
+
+
 def role_projection_multiplier(role: Any, *, overrides: dict[str, float] | None = None) -> float:
     r = str(role or "").strip()
     if overrides and r in overrides:
