@@ -47,6 +47,44 @@ STATS_OUT = SITE_DATA / "stats.csv"
 TEAMS_OUT = SITE_DATA / "teams.json"
 MY_TEAM_OUT = SITE_DATA / "my_team.json"
 
+INSIGHTS_DATA_ROOT = ROOT / "FPL-Core-Insights" / "data"
+
+
+def _find_latest_insights_season() -> str | None:
+    try:
+        if not INSIGHTS_DATA_ROOT.exists():
+            return None
+        seasons = [p.name for p in INSIGHTS_DATA_ROOT.iterdir() if p.is_dir() and "-" in p.name]
+        # Expect names like 2025-2026; lexical sort works for years.
+        seasons = sorted(seasons)
+        return seasons[-1] if seasons else None
+    except Exception:
+        return None
+
+
+def _read_latest_playerstats_by_id(*, season: str) -> dict[int, dict[str, Any]]:
+    """Return latest playerstats row per player_id for a given season."""
+    path = INSIGHTS_DATA_ROOT / season / "playerstats.csv"
+    if not path.exists():
+        return {}
+
+    rows = _read_csv_rows(path)
+    by_id: dict[int, dict[str, Any]] = {}
+    by_id_gw: dict[int, int] = {}
+
+    for r in rows:
+        pid = _to_int(r.get("player_id") or r.get("id") or r.get("element"))
+        if not pid:
+            continue
+        gw = _to_int(r.get("gw"))
+        if gw is None:
+            gw = -1
+        if pid not in by_id or gw >= by_id_gw.get(pid, -1):
+            by_id[pid] = dict(r)
+            by_id_gw[pid] = int(gw)
+
+    return by_id
+
 
 def _to_float(v: Any) -> float | None:
     if v is None:
@@ -208,6 +246,28 @@ def main() -> None:
         raise SystemExit(f"Missing projections CSV: {OUTPUTS_PROJ} (or {DATA_PROJ})")
 
     rows = _read_csv_rows(src)
+
+    # Merge Insights playerstats.csv into projection rows (for the static UI table).
+    season = _find_latest_insights_season()
+    if season:
+        stats_by_id = _read_latest_playerstats_by_id(season=season)
+        if stats_by_id:
+            merged: list[dict[str, Any]] = []
+            for r in rows:
+                rr = dict(r)
+                pid = None
+                for k in ("player_id", "element", "id"):
+                    if rr.get(k) not in (None, ""):
+                        pid = _to_int(rr.get(k))
+                        break
+                if pid and pid in stats_by_id:
+                    # Add any missing keys from playerstats onto projection row.
+                    for k, v in stats_by_id[pid].items():
+                        if k not in rr or rr.get(k) in (None, ""):
+                            rr[k] = v
+                merged.append(rr)
+            rows = merged
+
     normalized = _normalize_projection_rows(rows)
     _write_json(OUT_PROJ, normalized)
     try:

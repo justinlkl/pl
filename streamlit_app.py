@@ -89,6 +89,9 @@ STAT_FULL_NAMES: dict[str, str] = {
 DATA = Path("data")
 OUTPUTS = Path("outputs")
 
+INSIGHTS_ROOT = Path("FPL-Core-Insights") / "data"
+DEFAULT_INSIGHTS_SEASON = "2025-2026"
+
 PROJ_JSON = DATA / "projections.json"
 PROJ_CSV_FALLBACK = DATA / "projections.csv"
 PROJ_CSV = OUTPUTS / "projections.csv"
@@ -532,23 +535,57 @@ def enrich_with_fpl_stats(projections: pd.DataFrame) -> pd.DataFrame:
         return projections
 
     keep = [
+        # IDs / identity
         "id",
+        "first_name",
+        "second_name",
         "web_name",
         "element_type",
+
+        # Availability / market signals
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "news",
         "now_cost",
-        "minutes",
-        "starts",
-        "goals_scored",
-        "assists",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "ep_next",
+        "ep_this",
+
+        # Points
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+
+        # Expected / ICT
         "expected_goals",
         "expected_assists",
+        "expected_goal_involvements",
+        "expected_goals_conceded",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
+        "expected_goals_conceded_per_90",
         "influence",
         "creativity",
         "threat",
         "ict_index",
+
+        # Underlying basic stats
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
+
+        # Bonus
         "bonus",
         "bps",
-        "total_points",
+
+        # Team id
         "team",
     ]
     keep = [c for c in keep if c in els.columns]
@@ -560,8 +597,9 @@ def enrich_with_fpl_stats(projections: pd.DataFrame) -> pd.DataFrame:
         }
     )
     for c in stats.columns:
-        if c not in ("player_id", "web_name_fpl"):
-            stats[c] = pd.to_numeric(stats[c], errors="coerce")
+        if c in ("player_id", "web_name_fpl", "first_name", "second_name", "news"):
+            continue
+        stats[c] = pd.to_numeric(stats[c], errors="coerce")
 
     out = projections.merge(stats, on="player_id", how="left", suffixes=("", "_fpl"))
 
@@ -600,6 +638,254 @@ def enrich_with_fpl_stats(projections: pd.DataFrame) -> pd.DataFrame:
 
     out["gametime"] = (pd.to_numeric(out.get("minutes_prob", 0), errors="coerce").fillna(0.0) * 100.0)
     return out
+
+
+@st.cache_data
+def load_insights_playerstats(*, season: str = DEFAULT_INSIGHTS_SEASON) -> pd.DataFrame:
+    """Load FPL-Core-Insights season-level playerstats.csv (latest GW per player)."""
+    path = INSIGHTS_ROOT / season / "playerstats.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    if "id" in df.columns and "player_id" not in df.columns:
+        df = df.rename(columns={"id": "player_id"})
+
+    if "player_id" not in df.columns:
+        return pd.DataFrame()
+
+    df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+    if "gw" in df.columns:
+        df["gw"] = pd.to_numeric(df["gw"], errors="coerce").astype("Int64")
+
+    # Keep the latest gameweek snapshot per player.
+    if "gw" in df.columns:
+        df = df.dropna(subset=["player_id", "gw"]).copy()
+        df["player_id"] = df["player_id"].astype(int)
+        df["gw"] = df["gw"].astype(int)
+        df = df.sort_values(["player_id", "gw"]).groupby("player_id", sort=False, as_index=False).tail(1)
+    else:
+        df = df.dropna(subset=["player_id"]).copy()
+        df["player_id"] = df["player_id"].astype(int)
+
+    return df
+
+
+def enrich_with_insights_playerstats(projections: pd.DataFrame, *, season: str = DEFAULT_INSIGHTS_SEASON) -> pd.DataFrame:
+    """Merge Insights playerstats into projections (fills tackle/CBI/recoveries/defcon etc.)."""
+    if projections is None or projections.empty or "player_id" not in projections.columns:
+        return projections
+
+    stats = load_insights_playerstats(season=season)
+    if stats.empty or "player_id" not in stats.columns:
+        return projections
+
+    # Only bring across the fields we want to display.
+    desired = [
+        "player_id",
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "now_cost",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
+        "expected_goals_conceded_per_90",
+        "influence",
+        "creativity",
+        "threat",
+        "ict_index",
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
+        "defensive_contribution",
+        "defensive_contribution_per_90",
+        "tackles",
+        "clearances_blocks_interceptions",
+        "recoveries",
+        "clean_sheets_per_90",
+        "goals_conceded_per_90",
+        "starts_per_90",
+        "news",
+    ]
+    keep = [c for c in desired if c in stats.columns]
+    s2 = stats[keep].copy()
+
+    # Keep string columns as strings; coerce numeric where appropriate.
+    for c in s2.columns:
+        if c in ("player_id", "news"):
+            continue
+        s2[c] = pd.to_numeric(s2[c], errors="coerce")
+
+    out = projections.merge(s2, on="player_id", how="left", suffixes=("", "_insights"))
+
+    # Prefer live bootstrap for some fields, but fill any missing from insights.
+    def _fill(col: str) -> None:
+        alt = f"{col}_insights"
+        if col in out.columns and alt in out.columns:
+            out[col] = out[col].fillna(out[alt])
+
+    for col in (
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "now_cost",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
+        "expected_goals_conceded_per_90",
+        "influence",
+        "creativity",
+        "threat",
+        "ict_index",
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
+        "defensive_contribution",
+        "defensive_contribution_per_90",
+        "tackles",
+        "clearances_blocks_interceptions",
+        "recoveries",
+        "clean_sheets_per_90",
+        "goals_conceded_per_90",
+        "starts_per_90",
+        "news",
+    ):
+        _fill(col)
+
+    # Drop the suffixed columns to avoid clutter.
+    out = out.drop(columns=[c for c in out.columns if str(c).endswith("_insights")])
+    return out
+
+
+def build_clean_playerstats_view(
+    df: pd.DataFrame,
+    *,
+    per_90: bool,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    def _series(name: str, default=None) -> pd.Series:
+        if name in df.columns:
+            return df[name]
+        return pd.Series([default] * len(df))
+
+    minutes = pd.to_numeric(_series("minutes"), errors="coerce")
+
+    # MID-DM heuristic for showing defensive columns.
+    pos = _series("position", "").astype(str)
+    xgi90 = pd.to_numeric(_series("expected_goal_involvements_per_90"), errors="coerce").fillna(0.0)
+    defcon90 = pd.to_numeric(_series("defensive_contribution_per_90"), errors="coerce").fillna(0.0)
+    threat = pd.to_numeric(_series("threat"), errors="coerce").fillna(0.0)
+    creativity = pd.to_numeric(_series("creativity"), errors="coerce").fillna(0.0)
+
+    defense_proxy = defcon90
+    attack_proxy = xgi90 + 0.005 * (threat + creativity)
+    is_mid_dm = (pos == "MID") & (defense_proxy >= (attack_proxy * 1.25).clip(lower=0.6))
+    show_def_cols = pos.isin(["DEF", "GK"]) | is_mid_dm
+
+    view = pd.DataFrame(
+        {
+            "first_name": _series("first_name", ""),
+            "second_name": _series("second_name", ""),
+            "web_name": _series("web_name", ""),
+            "position": pos,
+            "team": _series("team", ""),
+
+            "chance_of_playing_this_round": _series("chance_of_playing_this_round"),
+            "chance_of_playing_next_round": _series("chance_of_playing_next_round"),
+            "news": _series("news", ""),
+
+            "now_cost": _series("now_cost"),
+            "selected_by_percent": _series("selected_by_percent"),
+            "value_form": _series("value_form"),
+            "value_season": _series("value_season"),
+
+            "total_points": _series("total_points"),
+            "event_points": _series("event_points"),
+            "points_per_game": _series("points_per_game"),
+            "form": _series("form"),
+
+            "expected_goals_per_90": _series("expected_goals_per_90"),
+            "expected_assists_per_90": _series("expected_assists_per_90"),
+            "expected_goal_involvements_per_90": _series("expected_goal_involvements_per_90"),
+            "expected_goals_conceded_per_90": _series("expected_goals_conceded_per_90"),
+
+            "influence": _series("influence"),
+            "creativity": _series("creativity"),
+            "threat": _series("threat"),
+            "ict_index": _series("ict_index"),
+
+            "minutes": minutes,
+            "goals_scored": _series("goals_scored"),
+            "assists": _series("assists"),
+            "clean_sheets": _series("clean_sheets"),
+            "goals_conceded": _series("goals_conceded"),
+            "starts": _series("starts"),
+
+            "defensive_contribution_per_90": _series("defensive_contribution_per_90"),
+            "tackles": _series("tackles"),
+            "clearances_blocks_interceptions": _series("clearances_blocks_interceptions"),
+            "recoveries": _series("recoveries"),
+        }
+    )
+
+    # Chance-of-playing sometimes comes as 0..1; normalize to 0..100 if needed.
+    for c in ("chance_of_playing_this_round", "chance_of_playing_next_round"):
+        s = pd.to_numeric(view[c], errors="coerce")
+        if s.notna().any() and float(s.dropna().max()) <= 1.0:
+            view[c] = (s * 100.0).round(0)
+        else:
+            view[c] = s
+
+    # Defensive-only: xGC/90
+    view.loc[~pos.isin(["DEF", "GK"]), "expected_goals_conceded_per_90"] = pd.NA
+
+    # Role-limited defensive columns
+    for c in ("defensive_contribution_per_90", "tackles", "clearances_blocks_interceptions", "recoveries"):
+        view.loc[~show_def_cols, c] = pd.NA
+
+    # Optional: convert the raw box-score stats to per-90 for display.
+    if per_90:
+        mins = pd.to_numeric(view["minutes"], errors="coerce")
+        denom = (mins / 90.0).where(mins.notna() & (mins > 0), other=pd.NA)
+        per90_cols = ["goals_scored", "assists", "clean_sheets", "goals_conceded", "starts", "tackles", "clearances_blocks_interceptions", "recoveries"]
+        for c in per90_cols:
+            view[c] = pd.to_numeric(view[c], errors="coerce") / denom
+
+    # Order by projected points if present, else by total_points.
+    if "proj_points" in df.columns:
+        view["proj_points"] = pd.to_numeric(df.get("proj_points"), errors="coerce")
+        view = view.sort_values("proj_points", ascending=False)
+    else:
+        view = view.sort_values("total_points", ascending=False)
+
+    return view
 
 
 def _first_col(df: pd.DataFrame, candidates: list[str]) -> pd.Series:
@@ -1214,6 +1500,9 @@ def main():
     # Enrich with live FPL stats (adds element_type, now_cost, team id, etc.)
     projections = enrich_with_fpl_stats(projections)
 
+    # Enrich with FPL-Core-Insights playerstats (tackles/CBI/recoveries/defcon + per-90 columns)
+    projections = enrich_with_insights_playerstats(projections, season=DEFAULT_INSIGHTS_SEASON)
+
     # Normalize again so derived fields (team/position/price/proj_points) are populated
     projections = normalize_projections(projections)
 
@@ -1392,7 +1681,7 @@ def main():
             st.info("No projections available.")
         else:
             c1, c2, c3 = st.columns(3)
-            per_90 = c1.toggle("Stats per 90", value=False)
+            per_90 = c1.toggle("Show box stats per 90", value=False)
             show_uncertainty = c2.toggle("Show P10/P50/P90", value=False)
             full_names = c3.toggle("Use full column names", value=False)
 
@@ -1409,12 +1698,10 @@ def main():
                 team_match = df_stats.get("team", pd.Series(dtype=str)).astype(str).str.contains(q, case=False, na=False)
                 df_stats = df_stats[name_match | team_match]
 
-            view = build_key_stats_view(
-                df_stats,
-                per_90=per_90,
-                include_uncertainty=show_uncertainty,
-                use_full_names=full_names,
-            )
+            if show_uncertainty or full_names:
+                st.caption("Note: the clean stats view ignores P10/P50/P90 and full-name mapping.")
+
+            view = build_clean_playerstats_view(df_stats, per_90=per_90)
             st.dataframe(view, width="stretch", hide_index=True)
 
     # Tab: Player profile

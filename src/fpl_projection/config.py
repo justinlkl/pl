@@ -13,6 +13,13 @@ exist in that dataset.
 
 # Core Predictors: essential player & context metrics.
 CORE_PREDICTORS: list[str] = [
+    # Availability/selection signals (from playerstats.csv if present)
+    "chance_of_playing_next_round",
+    "chance_of_playing_this_round",
+    "selected_by_percent",
+    "ep_next",
+    "ep_this",
+
     # Price/value context
     "now_cost",
     # FPL dataset already provides value metrics; treat value_season as the primary "value".
@@ -53,10 +60,15 @@ CORE_PREDICTORS: list[str] = [
 # Performance Enhancers: Advanced defensive & efficiency metrics
 PERFORMANCE_ENHANCERS: list[str] = [
     # Align with FPL 2025/26 scoring cap for defensive contributions
-    "defcon_points",
-    "defcon_actions_per_90",
-    "cbi_per_90",
-    "tackles_per_90",
+    # Role-weighted defensive channels (feature_engineering.calculate_role_weighted_features)
+    "defcon_points_def",
+    "defcon_points_gk",
+    "defcon_actions_per_90_def",
+    "defcon_actions_per_90_gk",
+    "cbi_per_90_def",
+    "cbi_per_90_gk",
+    "tackles_per_90_def",
+    "tackles_per_90_gk",
     "gi_minus_xgi",
     "xgi_overperformance",
     "xgi_underperformance",
@@ -72,7 +84,9 @@ ROLLING_FEATURES: list[str] = [
     "rolling_3_xgi",      # 3-game rolling xGI
     "rolling_5_points",   # 5-game rolling points
     "rolling_5_minutes",  # 5-game rolling minutes
-    "rolling_5_defensive",  # 5-game rolling defensive actions
+    # Role-weighted rolling defensive channels
+    "rolling_5_defensive_def",
+    "rolling_5_defensive_gk",
 ]
 
 # Cumulative Features (calculated during preprocessing, train-only)

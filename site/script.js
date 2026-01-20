@@ -335,6 +335,8 @@ function ProjectionsTab({ projections, onSelectPlayer }) {
   const [minPrice, setMinPrice] = React.useState(0);
   const [maxPrice, setMaxPrice] = React.useState(20);
   const [query, setQuery] = React.useState('');
+  const [showKeyStats, setShowKeyStats] = React.useState(false);
+  const [per90, setPer90] = React.useState(false);
 
   const priceOptions = React.useMemo(() => {
     const out = [];
@@ -362,6 +364,143 @@ function ProjectionsTab({ projections, onSelectPlayer }) {
       .filter((p) => !q || safeText(p.web_name).toLowerCase().includes(q) || safeText(p.team).toLowerCase().includes(q))
       .sort((a, b) => toNum(b.proj_points, 0) - toNum(a.proj_points, 0));
   }, [projections, pos, team, minPrice, maxPrice, query]);
+
+  function isMidDM(p) {
+    if (safeText(p.position) !== 'MID') return false;
+    const xgi90 = toNum(p.expected_goal_involvements_per_90, 0);
+    const threat = toNum(p.threat, 0);
+    const creativity = toNum(p.creativity, 0);
+    const attack = xgi90 + 0.005 * (threat + creativity);
+
+    const mins = toNum(p.minutes, 0);
+    const denom = mins > 0 ? (mins / 90.0) : 0;
+    const defcon90 = (p.defensive_contribution_per_90 != null && safeText(p.defensive_contribution_per_90) !== '')
+      ? toNum(p.defensive_contribution_per_90, 0)
+      : (denom > 0 ? (toNum(p.defensive_contribution, 0) / denom) : 0);
+
+    const defense = defcon90;
+    return defense >= Math.max(attack * 1.25, 0.6);
+  }
+
+  function maybePer90(val, mins) {
+    if (!per90) return val;
+    const m = toNum(mins, 0);
+    if (!m) return null;
+    return toNum(val, 0) / (m / 90.0);
+  }
+
+  function fmtMaybe(val, digits) {
+    if (val == null || safeText(val) === '') return '—';
+    const n = Number(val);
+    if (!Number.isFinite(n)) return safeText(val);
+    return n.toFixed(digits);
+  }
+
+  function fmtNowCost(v) {
+    const n = toNum(v, null);
+    if (n == null) return '—';
+    // FPL now_cost is usually tenths (e.g., 72 -> 7.2)
+    if (n > 20) return (n / 10.0).toFixed(1);
+    return String(n);
+  }
+
+  function buildKeyStatsColumns() {
+    // Clean requested columns, plus xPts to keep the projections table useful.
+    return [
+      { key: 'web_name', label: 'web_name', render: (p) => safeText(p.web_name) },
+      { key: 'position', label: 'position', render: (p) => safeText(p.position) },
+      { key: 'team', label: 'team', render: (p) => safeText(p.team) },
+      { key: 'proj_points', label: 'proj_points', render: (p) => fmtMaybe(toNum(p.proj_points, 0), 2) },
+
+      { key: 'first_name', label: 'first_name', render: (p) => safeText(p.first_name) || '—' },
+      { key: 'second_name', label: 'second_name', render: (p) => safeText(p.second_name) || '—' },
+
+      { key: 'chance_of_playing_this_round', label: 'chance_of_playing_this_round', render: (p) => fmtMaybe(toNum(p.chance_of_playing_this_round, null), 0) },
+      { key: 'chance_of_playing_next_round', label: 'chance_of_playing_next_round', render: (p) => fmtMaybe(toNum(p.chance_of_playing_next_round, null), 0) },
+      { key: 'news', label: 'news', render: (p) => safeText(p.news) || '—' },
+
+      { key: 'now_cost', label: 'now_cost', render: (p) => fmtNowCost(p.now_cost) },
+      { key: 'selected_by_percent', label: 'selected_by_percent', render: (p) => fmtMaybe(toNum(p.selected_by_percent, null), 1) },
+      { key: 'value_form', label: 'value_form', render: (p) => fmtMaybe(toNum(p.value_form, null), 2) },
+      { key: 'value_season', label: 'value_season', render: (p) => fmtMaybe(toNum(p.value_season, null), 2) },
+
+      { key: 'total_points', label: 'total_points', render: (p) => fmtMaybe(toNum(p.total_points, null), 0) },
+      { key: 'event_points', label: 'event_points', render: (p) => fmtMaybe(toNum(p.event_points, null), 0) },
+      { key: 'points_per_game', label: 'points_per_game', render: (p) => fmtMaybe(toNum(p.points_per_game, null), 1) },
+      { key: 'form', label: 'form', render: (p) => fmtMaybe(toNum(p.form, null), 1) },
+
+      { key: 'expected_goals_per_90', label: 'expected_goals_per_90', render: (p) => fmtMaybe(toNum(p.expected_goals_per_90, null), 3) },
+      { key: 'expected_assists_per_90', label: 'expected_assists_per_90', render: (p) => fmtMaybe(toNum(p.expected_assists_per_90, null), 3) },
+      { key: 'expected_goal_involvements_per_90', label: 'expected_goal_involvements_per_90', render: (p) => fmtMaybe(toNum(p.expected_goal_involvements_per_90, null), 3) },
+      {
+        key: 'expected_goals_conceded_per_90',
+        label: 'expected_goals_conceded_per_90',
+        render: (p) => {
+          const pos = safeText(p.position);
+          if (pos !== 'DEF' && pos !== 'GK') return '—';
+          return fmtMaybe(toNum(p.expected_goals_conceded_per_90, null), 3);
+        },
+      },
+
+      { key: 'influence', label: 'influence', render: (p) => fmtMaybe(toNum(p.influence, null), 1) },
+      { key: 'creativity', label: 'creativity', render: (p) => fmtMaybe(toNum(p.creativity, null), 1) },
+      { key: 'threat', label: 'threat', render: (p) => fmtMaybe(toNum(p.threat, null), 1) },
+      { key: 'ict_index', label: 'ict_index', render: (p) => fmtMaybe(toNum(p.ict_index, null), 1) },
+
+      { key: 'minutes', label: 'minutes', render: (p) => fmtMaybe(toNum(p.minutes, null), 0) },
+      { key: 'goals_scored', label: 'goals_scored', render: (p) => fmtMaybe(maybePer90(p.goals_scored, p.minutes), per90 ? 3 : 0) },
+      { key: 'assists', label: 'assists', render: (p) => fmtMaybe(maybePer90(p.assists, p.minutes), per90 ? 3 : 0) },
+      { key: 'clean_sheets', label: 'clean_sheets', render: (p) => fmtMaybe(maybePer90(p.clean_sheets, p.minutes), per90 ? 3 : 0) },
+      { key: 'goals_conceded', label: 'goals_conceded', render: (p) => fmtMaybe(maybePer90(p.goals_conceded, p.minutes), per90 ? 3 : 0) },
+      { key: 'starts', label: 'starts', render: (p) => fmtMaybe(maybePer90(p.starts, p.minutes), per90 ? 3 : 0) },
+
+      {
+        key: 'defensive_contribution_per_90',
+        label: 'defensive_contribution_per_90',
+        render: (p) => {
+          const pos = safeText(p.position);
+          const show = (pos === 'DEF' || pos === 'GK' || isMidDM(p));
+          if (!show) return '—';
+          const mins = toNum(p.minutes, 0);
+          const denom = mins > 0 ? (mins / 90.0) : 0;
+          const base = (p.defensive_contribution_per_90 != null && safeText(p.defensive_contribution_per_90) !== '')
+            ? toNum(p.defensive_contribution_per_90, null)
+            : (denom > 0 ? (toNum(p.defensive_contribution, 0) / denom) : null);
+          return fmtMaybe(base, 3);
+        },
+      },
+      {
+        key: 'tackles',
+        label: 'tackles',
+        render: (p) => {
+          const pos = safeText(p.position);
+          const show = (pos === 'DEF' || pos === 'GK' || isMidDM(p));
+          if (!show) return '—';
+          return fmtMaybe(maybePer90(p.tackles, p.minutes), per90 ? 3 : 0);
+        },
+      },
+      {
+        key: 'clearances_blocks_interceptions',
+        label: 'clearances_blocks_interceptions',
+        render: (p) => {
+          const pos = safeText(p.position);
+          const show = (pos === 'DEF' || pos === 'GK' || isMidDM(p));
+          if (!show) return '—';
+          return fmtMaybe(maybePer90(p.clearances_blocks_interceptions, p.minutes), per90 ? 3 : 0);
+        },
+      },
+      {
+        key: 'recoveries',
+        label: 'recoveries',
+        render: (p) => {
+          const pos = safeText(p.position);
+          const show = (pos === 'DEF' || pos === 'GK' || isMidDM(p));
+          if (!show) return '—';
+          return fmtMaybe(maybePer90(p.recoveries, p.minutes), per90 ? 3 : 0);
+        },
+      },
+    ];
+  }
 
   return React.createElement(
     'div',
@@ -395,6 +534,18 @@ function ProjectionsTab({ projections, onSelectPlayer }) {
         React.createElement('div', { className: 'col-md-3' },
           React.createElement('label', { className: 'form-label' }, 'Search'),
           React.createElement('input', { className: 'form-control', placeholder: 'Name or team…', value: query, onChange: (e) => setQuery(e.target.value) })
+        ),
+        React.createElement('div', { className: 'col-md-2' },
+          React.createElement('div', { className: 'form-check form-switch' },
+            React.createElement('input', { className: 'form-check-input', type: 'checkbox', checked: showKeyStats, onChange: (e) => setShowKeyStats(!!e.target.checked) }),
+            React.createElement('label', { className: 'form-check-label' }, 'Key stats columns')
+          )
+        ),
+        React.createElement('div', { className: 'col-md-2' },
+          React.createElement('div', { className: 'form-check form-switch' },
+            React.createElement('input', { className: 'form-check-input', type: 'checkbox', checked: per90, disabled: !showKeyStats, onChange: (e) => setPer90(!!e.target.checked) }),
+            React.createElement('label', { className: 'form-check-label' }, 'Per 90')
+          )
         )
       ),
       React.createElement('div', { className: 'text-muted small mt-2' }, `${filtered.length} players`) 
@@ -402,27 +553,46 @@ function ProjectionsTab({ projections, onSelectPlayer }) {
 
     React.createElement('div', { className: 'card p-0 overflow-hidden' },
       React.createElement('div', { className: 'table-responsive' },
-        React.createElement('table', { className: 'table table-sm table-hover mb-0' },
-          React.createElement('thead', null,
-            React.createElement('tr', null,
-              React.createElement('th', null, 'Player'),
-              React.createElement('th', null, 'Team'),
-              React.createElement('th', null, 'Pos'),
-              React.createElement('th', null, '£m'),
-              React.createElement('th', null, 'xPts')
-            )
-          ),
-          React.createElement('tbody', null,
-            filtered.slice(0, 200).map((p) =>
-              React.createElement('tr', { key: p.player_id || `${p.web_name}-${p.team}`, className: 'player-card', onClick: () => onSelectPlayer(p) },
-                React.createElement('td', null, safeText(p.web_name)),
-                React.createElement('td', null, safeText(p.team)),
-                React.createElement('td', null, safeText(p.position)),
-                React.createElement('td', null, `£${toNum(p.price, 0).toFixed(1)}`),
-                React.createElement('td', null, formatMaybeNum(p.proj_points, 2))
+        (showKeyStats
+          ? (() => {
+              const cols = buildKeyStatsColumns();
+              return React.createElement('table', { className: 'table table-sm table-hover mb-0' },
+                React.createElement('thead', null,
+                  React.createElement('tr', null,
+                    cols.map((c) => React.createElement('th', { key: c.key }, c.label))
+                  )
+                ),
+                React.createElement('tbody', null,
+                  filtered.slice(0, 200).map((p) =>
+                    React.createElement('tr', { key: p.player_id || `${p.web_name}-${p.team}`, className: 'player-card', onClick: () => onSelectPlayer(p) },
+                      cols.map((c) => React.createElement('td', { key: c.key }, c.render(p)))
+                    )
+                  )
+                )
+              );
+            })()
+          : React.createElement('table', { className: 'table table-sm table-hover mb-0' },
+              React.createElement('thead', null,
+                React.createElement('tr', null,
+                  React.createElement('th', null, 'Player'),
+                  React.createElement('th', null, 'Team'),
+                  React.createElement('th', null, 'Pos'),
+                  React.createElement('th', null, '£m'),
+                  React.createElement('th', null, 'xPts')
+                )
+              ),
+              React.createElement('tbody', null,
+                filtered.slice(0, 200).map((p) =>
+                  React.createElement('tr', { key: p.player_id || `${p.web_name}-${p.team}`, className: 'player-card', onClick: () => onSelectPlayer(p) },
+                    React.createElement('td', null, safeText(p.web_name)),
+                    React.createElement('td', null, safeText(p.team)),
+                    React.createElement('td', null, safeText(p.position)),
+                    React.createElement('td', null, `£${toNum(p.price, 0).toFixed(1)}`),
+                    React.createElement('td', null, formatMaybeNum(p.proj_points, 2))
+                  )
+                )
               )
             )
-          )
         )
       )
     )

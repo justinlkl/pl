@@ -10,6 +10,7 @@ import tensorflow as tf
 from .config import DEFAULT_FEATURE_COLUMNS, DEFAULT_HORIZON, DEFAULT_SEQ_LENGTH, TARGET_COLUMN
 from .data_loading import load_premier_league_gameweek_stats
 from .preprocessing import PreprocessArtifacts, select_and_coerce_numeric, transform_sequences
+from .role_modeling import build_feature_weight_vector, infer_role_from_window, list_roles
 
 
 def main() -> None:
@@ -20,6 +21,16 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
     parser.add_argument("--artifacts-dir", default=None)
     parser.add_argument("--output", default=None)
+    parser.add_argument(
+        "--use-role-models",
+        action="store_true",
+        help="Use per-role models under artifacts/models if present (otherwise use artifacts/model.keras).",
+    )
+    parser.add_argument(
+        "--mid-split",
+        action="store_true",
+        help="If role models exist, split MID into MID_DM/MID_AM using a heuristic.",
+    )
     parser.add_argument(
         "--internal-output",
         default=None,
@@ -43,18 +54,8 @@ def main() -> None:
     if output_path.parent != Path("."):
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    model = tf.keras.models.load_model(artifacts_dir / "model.keras")
-    prep = PreprocessArtifacts.load(str(artifacts_dir / "preprocess.joblib"))
-
-    # Make horizon consistent with the loaded model.
-    # This avoids runtime errors if the artifacts were trained with a different horizon.
-    model_horizon = int(model.output_shape[-1])
-    if args.horizon != model_horizon:
-        print(
-            f"Warning: --horizon={args.horizon} but loaded model outputs horizon={model_horizon}. "
-            f"Using model horizon={model_horizon}."
-        )
-        args.horizon = model_horizon
+    role_models_dir = artifacts_dir / "models"
+    use_role_models = bool(args.use_role_models) and role_models_dir.exists() and role_models_dir.is_dir()
 
     raw = load_premier_league_gameweek_stats(repo_root=repo_root, season=args.season)
 
@@ -74,52 +75,162 @@ def main() -> None:
             return "FWD"
         return str(v or "").strip()
 
-    # Keep names for table, but select numeric columns for modeling.
-    df = select_and_coerce_numeric(raw, prep.feature_columns, TARGET_COLUMN)
+    # Determine horizon from artifacts (role models or single model)
+    if use_role_models:
+        # Prefer the first role's horizon as canonical.
+        roles = list_roles(mid_split=args.mid_split)
+        model_horizon = None
+        for r in roles:
+            candidate = role_models_dir / r / "model.keras"
+            if candidate.exists():
+                m = tf.keras.models.load_model(candidate)
+                model_horizon = int(m.output_shape[-1])
+                break
+        if model_horizon is None:
+            raise FileNotFoundError(f"No role models found under: {role_models_dir}")
+        if args.horizon != model_horizon:
+            print(
+                f"Warning: --horizon={args.horizon} but role models output horizon={model_horizon}. "
+                f"Using model horizon={model_horizon}."
+            )
+            args.horizon = model_horizon
+    else:
+        model = tf.keras.models.load_model(artifacts_dir / "model.keras")
+        prep = PreprocessArtifacts.load(str(artifacts_dir / "preprocess.joblib"))
+        model_horizon = int(model.output_shape[-1])
+        if args.horizon != model_horizon:
+            print(
+                f"Warning: --horizon={args.horizon} but loaded model outputs horizon={model_horizon}. "
+                f"Using model horizon={model_horizon}."
+            )
+            args.horizon = model_horizon
 
-    last_gw = int(df["gw"].max())
+    # Determine last available gameweek from raw (works for both role-model and single-model paths).
+    if "gw" not in raw.columns:
+        raise ValueError("Input data is missing required column: gw")
+    last_gw = int(pd.to_numeric(raw["gw"], errors="coerce").dropna().max())
+
+    # Keep names for table, but select numeric columns for modeling.
+    # For role models, we'll select per-role based on each role's saved feature_columns.
+    if not use_role_models:
+        df = select_and_coerce_numeric(raw, prep.feature_columns, TARGET_COLUMN)
     next_gws = list(range(last_gw + 1, last_gw + 1 + args.horizon))
 
-    # Build the last seq_length timesteps per player.
-    rows: list[dict] = []
-    X_list: list[np.ndarray] = []
+    if use_role_models:
+        # Build player-level metadata early (for role assignment)
+        meta_cols = [c for c in ["player_id", "web_name", "team_code", "position"] if c in raw.columns]
+        meta = (
+            raw.sort_values(["player_id", "gw"])
+            .groupby("player_id", sort=False, as_index=False)
+            .tail(1)[meta_cols]
+            .copy()
+        )
+        if "position" in meta.columns:
+            meta["position"] = meta["position"].apply(_pos_to_abbrev)
 
-    for player_id, g in df.sort_values(["player_id", "gw"]).groupby("player_id", sort=False):
-        g = g.sort_values("gw")
-        if len(g) < args.seq_length:
-            continue
+        # We'll fill predictions into this dict keyed by player_id.
+        preds_by_pid: dict[int, np.ndarray] = {}
 
-        window = g.iloc[-args.seq_length:]
-        X_window = window[prep.feature_columns].to_numpy(dtype=float)
-        if X_window.shape != (args.seq_length, len(prep.feature_columns)):
-            continue
+        roles = list_roles(mid_split=args.mid_split)
+        for role in roles:
+            model_path = role_models_dir / role / "model.keras"
+            prep_path = role_models_dir / role / "preprocess.joblib"
+            if not model_path.exists() or not prep_path.exists():
+                continue
 
-        X_list.append(X_window)
+            model_r = tf.keras.models.load_model(model_path)
+            prep_r = PreprocessArtifacts.load(str(prep_path))
 
-        rows.append({"player_id": int(player_id)})
+            # Select modeling columns needed for this role model.
+            df_r = select_and_coerce_numeric(raw, prep_r.feature_columns, TARGET_COLUMN)
 
-    if not X_list:
-        raise ValueError("No players had enough history to build sequences.")
+            X_list: list[np.ndarray] = []
+            pid_list: list[int] = []
 
-    X = np.stack(X_list, axis=0)
-    X = transform_sequences(prep.pipeline, X)
+            for player_id, g in df_r.sort_values(["player_id", "gw"]).groupby("player_id", sort=False):
+                g = g.sort_values("gw")
+                if len(g) < args.seq_length:
+                    continue
+                window = g.iloc[-args.seq_length:]
 
-    preds = model.predict(X, verbose=0)
-    # preds shape: (n_players, horizon)
+                # Assign role based on position + last-timestep engineered metrics.
+                pos = None
+                if "position" in meta.columns:
+                    match = meta.loc[meta["player_id"] == int(player_id)]
+                    if not match.empty:
+                        pos = match.iloc[0].get("position")
 
-    out = pd.DataFrame(rows)
+                inferred = infer_role_from_window(pos, window, mid_split=args.mid_split)
+                if inferred != role:
+                    continue
 
-    # Attach player metadata (name/team/position) from the latest available row.
-    meta_cols = [c for c in ["player_id", "web_name", "team_code", "position"] if c in raw.columns]
-    meta = (
-        raw.sort_values(["player_id", "gw"])
-        .groupby("player_id", sort=False, as_index=False)
-        .tail(1)[meta_cols]
-        .copy()
-    )
-    if "position" in meta.columns:
-        meta["position"] = meta["position"].apply(_pos_to_abbrev)
-    out = out.merge(meta, on="player_id", how="left")
+                X_window = window[prep_r.feature_columns].to_numpy(dtype=float)
+                if X_window.shape != (args.seq_length, len(prep_r.feature_columns)):
+                    continue
+                X_list.append(X_window)
+                pid_list.append(int(player_id))
+
+            if not X_list:
+                continue
+
+            X = np.stack(X_list, axis=0)
+            X = transform_sequences(prep_r.pipeline, X)
+            w = build_feature_weight_vector(prep_r.feature_columns, role)
+            X = X * w
+            preds = model_r.predict(X, verbose=0)
+
+            for pid, p in zip(pid_list, preds, strict=False):
+                preds_by_pid[int(pid)] = p
+
+        if not preds_by_pid:
+            raise ValueError("No players had enough history to build sequences for any role model.")
+
+        out = pd.DataFrame({"player_id": list(preds_by_pid.keys())})
+        preds_matrix = np.stack([preds_by_pid[int(pid)] for pid in out["player_id"].to_list()], axis=0)
+
+        # Attach player metadata
+        out = out.merge(meta, on="player_id", how="left")
+        preds = preds_matrix
+    else:
+        # Build the last seq_length timesteps per player.
+        rows: list[dict] = []
+        X_list: list[np.ndarray] = []
+
+        for player_id, g in df.sort_values(["player_id", "gw"]).groupby("player_id", sort=False):
+            g = g.sort_values("gw")
+            if len(g) < args.seq_length:
+                continue
+
+            window = g.iloc[-args.seq_length:]
+            X_window = window[prep.feature_columns].to_numpy(dtype=float)
+            if X_window.shape != (args.seq_length, len(prep.feature_columns)):
+                continue
+
+            X_list.append(X_window)
+            rows.append({"player_id": int(player_id)})
+
+        if not X_list:
+            raise ValueError("No players had enough history to build sequences.")
+
+        X = np.stack(X_list, axis=0)
+        X = transform_sequences(prep.pipeline, X)
+        X = X * build_feature_weight_vector(prep.feature_columns, "ALL")
+
+        preds = model.predict(X, verbose=0)
+        out = pd.DataFrame(rows)
+
+    if not use_role_models:
+        # Attach player metadata (name/team/position) from the latest available row.
+        meta_cols = [c for c in ["player_id", "web_name", "team_code", "position"] if c in raw.columns]
+        meta = (
+            raw.sort_values(["player_id", "gw"])
+            .groupby("player_id", sort=False, as_index=False)
+            .tail(1)[meta_cols]
+            .copy()
+        )
+        if "position" in meta.columns:
+            meta["position"] = meta["position"].apply(_pos_to_abbrev)
+        out = out.merge(meta, on="player_id", how="left")
 
     # Attach club short/full names from teams.csv (team_code -> short_name/name)
     if teams_path.exists() and "team_code" in out.columns:

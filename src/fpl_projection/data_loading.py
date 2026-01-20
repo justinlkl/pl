@@ -101,6 +101,68 @@ def load_premier_league_gameweek_stats(
         # Metadata enrich is best-effort; core stats can still load without it.
         pass
 
+    # Attach per-GW player availability/market signals from playerstats.csv (best-effort).
+    # This file includes chance_of_playing_* and selected_by_percent, which help avoid
+    # over-ranking likely-bench players.
+    try:
+        stats_path = paths.insights_data_root / season / "playerstats.csv"
+        if stats_path.exists():
+            stats = pd.read_csv(stats_path)
+            if "id" in stats.columns and "player_id" not in stats.columns:
+                stats = stats.rename(columns={"id": "player_id"})
+
+            if "player_id" in stats.columns and "gw" in stats.columns:
+                stats["player_id"] = pd.to_numeric(stats["player_id"], errors="coerce").astype("Int64")
+                stats["gw"] = pd.to_numeric(stats["gw"], errors="coerce").astype("Int64")
+                stats = stats.dropna(subset=["player_id", "gw"]).copy()
+                stats["player_id"] = stats["player_id"].astype(int)
+                stats["gw"] = stats["gw"] .astype(int)
+
+                # Only bring the availability/market signals needed for modeling.
+                # Keeping this small avoids mixed-type merge issues and keeps loading fast.
+                keep_cols = [
+                    "player_id",
+                    "gw",
+                    "chance_of_playing_next_round",
+                    "chance_of_playing_this_round",
+                    "selected_by_percent",
+                    "ep_next",
+                    "ep_this",
+                ]
+                keep_cols = [c for c in keep_cols if c in stats.columns]
+                stats = stats[keep_cols].drop_duplicates(subset=["player_id", "gw"], keep="last")
+
+                all_df = all_df.merge(stats, on=["player_id", "gw"], how="left")
+
+                # If the base dataset already had these columns, pandas will suffix them.
+                # Coalesce back into canonical names so modeling code can depend on them.
+                def _coalesce(base: str) -> None:
+                    x = f"{base}_x"
+                    y = f"{base}_y"
+                    if base in all_df.columns:
+                        return
+                    if x in all_df.columns and y in all_df.columns:
+                        all_df[base] = all_df[x].combine_first(all_df[y])
+                        all_df.drop(columns=[x, y], inplace=True)
+                        return
+                    if x in all_df.columns:
+                        all_df.rename(columns={x: base}, inplace=True)
+                        return
+                    if y in all_df.columns:
+                        all_df.rename(columns={y: base}, inplace=True)
+
+                for c in (
+                    "chance_of_playing_next_round",
+                    "chance_of_playing_this_round",
+                    "selected_by_percent",
+                    "ep_next",
+                    "ep_this",
+                ):
+                    _coalesce(c)
+    except Exception as exc:
+        # Best-effort; don't block core loading, but make failure visible.
+        print(f"Warning: failed to merge playerstats.csv availability signals: {exc}")
+
     # Prefer web_name for display.
     if "web_name" not in all_df.columns:
         all_df["web_name"] = ""

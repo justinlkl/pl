@@ -97,14 +97,25 @@ def calculate_per_90_metrics(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["cbi_per_90"] = 0.0
     
-    # Defensive actions per 90 (kept for context, but prefer capped defcon_points in modeling)
+    # Defensive actions per 90 (kept for context), but cap it to the match-level threshold.
+    # Rationale: FPL defensive contribution scoring is capped (0/2 points), so raw action
+    # volume above the threshold should not keep increasing model signal.
     if "defcon_actions" in df.columns:
-        df["defcon_actions_per_90"] = pd.to_numeric(df["defcon_actions"], errors="coerce").fillna(0.0) / minutes_per_90
+        actions = pd.to_numeric(df["defcon_actions"], errors="coerce").fillna(0.0)
     elif "tackles" in df.columns and "clearances_blocks_interceptions" in df.columns:
-        def_total = df["tackles"].fillna(0) + df["clearances_blocks_interceptions"].fillna(0)
-        df["defcon_actions_per_90"] = def_total / minutes_per_90
+        actions = (df["tackles"].fillna(0) + df["clearances_blocks_interceptions"].fillna(0)).astype(float)
     else:
-        df["defcon_actions_per_90"] = 0.0
+        actions = pd.Series([0.0] * len(df), index=df.index)
+
+    per90 = actions / minutes_per_90
+
+    pos_norm = df.get("position", pd.Series(["" for _ in range(len(df))], index=df.index)).astype(str).str.strip().str.lower()
+    is_def = pos_norm.isin(["defender", "def", "df"])
+    is_gk = pos_norm.isin(["goalkeeper", "gk"])
+    is_mid_fwd = ~(is_def | is_gk)
+    threshold = np.where(is_def.to_numpy(), 10.0, np.where(is_mid_fwd.to_numpy(), 12.0, np.inf))
+
+    df["defcon_actions_per_90"] = np.minimum(per90.to_numpy(dtype=float), threshold)
     
     # Combined tackles + cbi per 90
     if "tackles" in df.columns and "clearances_blocks_interceptions" in df.columns:
@@ -162,6 +173,83 @@ def calculate_performance_vs_expectation(df: pd.DataFrame) -> pd.DataFrame:
     # Expected goal/assist combinations
     df["xg_plus_xa"] = xg + xa
     
+    return df
+
+
+def calculate_availability_probabilities(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize chance_of_playing_* columns to 0..1 floats (best-effort)."""
+    df = df.copy()
+    for c in ("chance_of_playing_next_round", "chance_of_playing_this_round"):
+        if c in df.columns:
+            s = pd.to_numeric(df[c], errors="coerce")
+            # Some rows are blank/NaN; keep NaN so the imputer can handle it.
+            df[c] = (s / 100.0).clip(lower=0.0, upper=1.0)
+    return df
+
+
+def calculate_market_log_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add log1p-transformed market features expected by older trained artifacts."""
+    df = df.copy()
+
+    if "now_cost" in df.columns:
+        s = pd.to_numeric(df["now_cost"], errors="coerce").fillna(0.0)
+        df["now_cost_log1p"] = np.log1p(np.maximum(s, 0.0))
+    else:
+        df["now_cost_log1p"] = 0.0
+
+    if "selected_by_percent" in df.columns:
+        s = pd.to_numeric(df["selected_by_percent"], errors="coerce").fillna(0.0)
+        df["selected_by_percent_log1p"] = np.log1p(np.maximum(s, 0.0))
+    else:
+        df["selected_by_percent_log1p"] = 0.0
+
+    return df
+
+
+def calculate_role_weighted_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Create role-aware defensive feature variants.
+
+    Defensive contribution signals (defcon / tackles / CBI / etc.) are useful, but
+    can over-dominate MID rankings if treated identically across positions.
+
+    We generate separate columns per position with conservative down-weighting for MID/FWD.
+    This gives the model clean role-specific channels instead of one global defensive axis.
+    """
+    df = df.copy()
+
+    # Ensure position flags exist.
+    for c in ("pos_gk", "pos_def", "pos_mid", "pos_fwd"):
+        if c not in df.columns:
+            df = calculate_position_features(df)
+            break
+
+    pos_def = pd.to_numeric(df.get("pos_def", 0.0), errors="coerce").fillna(0.0)
+    pos_mid = pd.to_numeric(df.get("pos_mid", 0.0), errors="coerce").fillna(0.0)
+    pos_fwd = pd.to_numeric(df.get("pos_fwd", 0.0), errors="coerce").fillna(0.0)
+    pos_gk = pd.to_numeric(df.get("pos_gk", 0.0), errors="coerce").fillna(0.0)
+
+    # Feature-specific weights: aggressively down-weight MID/FWD defensive *volume*.
+    # This is a guardrail against MIDs with high defensive actions dominating rankings.
+    feat_weights: dict[str, dict[str, float]] = {
+        # The capped points signal is still relevant for all outfield roles, but smaller for MID/FWD.
+        "defcon_points": {"def": 1.0, "mid": 0.12, "fwd": 0.08, "gk": 0.0},
+        # Volume above threshold is already capped in calculate_per_90_metrics; still keep tiny for MID/FWD.
+        "defcon_actions_per_90": {"def": 0.7, "mid": 0.03, "fwd": 0.02, "gk": 0.0},
+        "cbi_per_90": {"def": 1.0, "mid": 0.10, "fwd": 0.06, "gk": 0.0},
+        "tackles_per_90": {"def": 1.0, "mid": 0.10, "fwd": 0.06, "gk": 0.0},
+        # Rolling defensive volume: very small for MID/FWD.
+        "rolling_5_defensive": {"def": 0.8, "mid": 0.05, "fwd": 0.03, "gk": 0.0},
+    }
+
+    for feat, w in feat_weights.items():
+        if feat not in df.columns:
+            continue
+        base = pd.to_numeric(df[feat], errors="coerce").fillna(0.0)
+        df[f"{feat}_def"] = base * pos_def * float(w["def"])
+        df[f"{feat}_mid"] = base * pos_mid * float(w["mid"])
+        df[f"{feat}_fwd"] = base * pos_fwd * float(w["fwd"])
+        df[f"{feat}_gk"] = base * pos_gk * float(w["gk"])
+
     return df
 
 
@@ -297,11 +385,14 @@ def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
     
     # Apply transformations in sequence
     df = calculate_position_features(df)
+    df = calculate_availability_probabilities(df)
+    df = calculate_market_log_features(df)
     df = calculate_availability_features(df)
     df = calculate_defensive_contribution_points(df)
     df = calculate_per_90_metrics(df)
     df = calculate_performance_vs_expectation(df)
     df = calculate_rolling_features(df, windows=[3, 5])
+    df = calculate_role_weighted_features(df)
     df = calculate_cumulative_features(df)
     
     return df
