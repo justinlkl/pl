@@ -575,8 +575,8 @@ def main() -> None:
 
     callbacks = [
         val_metrics_cb,
-        tf.keras.callbacks.EarlyStopping(monitor=monitor, patience=8, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=4, min_lr=1e-6),
+        tf.keras.callbacks.EarlyStopping(monitor=monitor, mode="min", patience=8, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(monitor=monitor, mode="min", factor=0.5, patience=4, min_lr=1e-6),
     ]
 
     print(f"Training for up to {args.epochs} epochs with batch_size={args.batch_size}...")
