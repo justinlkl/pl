@@ -506,14 +506,18 @@ def main() -> None:
     if use_bias_penalty:
         cap_train = _xgi_cap_from_raw_sequences(train_ds.X, train_roles, feature_columns=available_features)
         cap_val = _xgi_cap_from_raw_sequences(val_ds.X, val_roles, feature_columns=available_features)
+        cap_test = _xgi_cap_from_raw_sequences(test_ds.X, test_roles, feature_columns=available_features)
 
         cap_train = np.repeat(cap_train.reshape(-1, 1), args.horizon, axis=1)
         cap_val = np.repeat(cap_val.reshape(-1, 1), args.horizon, axis=1)
+        cap_test = np.repeat(cap_test.reshape(-1, 1), args.horizon, axis=1)
         y_train = np.stack([train_ds.y, cap_train], axis=-1)
         y_val = np.stack([val_ds.y, cap_val], axis=-1)
+        y_test = np.stack([test_ds.y, cap_test], axis=-1)
     else:
         y_train = train_ds.y
         y_val = val_ds.y
+        y_test = test_ds.y
 
     print(f"Building LSTM model (seq_length={args.seq_length}, features={n_features}, horizon={args.horizon})")
     model = build_lstm_model(seq_length=args.seq_length, num_features=n_features, horizon=args.horizon)
@@ -592,7 +596,11 @@ def main() -> None:
     )
 
     print("\nEvaluating on test set...")
-    test_loss, test_mae = model.evaluate(X_test, test_ds.y, verbose=0)
+    if sw_train is not None:
+        sw_test = np.asarray([role_loss_weight(r) for r in test_roles], dtype=float)
+    else:
+        sw_test = None
+    test_loss, test_mae = model.evaluate(X_test, y_test, sample_weight=sw_test, verbose=0)
     print(f"Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}")
 
     model_path = artifacts_dir / "model.keras"
