@@ -133,7 +133,7 @@ def main() -> None:
         for r in roles:
             candidate = role_models_dir / r / "model.keras"
             if candidate.exists():
-                m = tf.keras.models.load_model(candidate)
+                m = tf.keras.models.load_model(candidate, compile=False)
                 model_horizon = int(m.output_shape[-1])
                 break
         if model_horizon is None:
@@ -145,7 +145,7 @@ def main() -> None:
             )
             args.horizon = model_horizon
     else:
-        model = tf.keras.models.load_model(artifacts_dir / "model.keras")
+        model = tf.keras.models.load_model(artifacts_dir / "model.keras", compile=False)
         prep = PreprocessArtifacts.load(str(artifacts_dir / "preprocess.joblib"))
         model_horizon = int(model.output_shape[-1])
         if args.horizon != model_horizon:
@@ -188,7 +188,7 @@ def main() -> None:
             if not model_path.exists() or not prep_path.exists():
                 continue
 
-            model_r = tf.keras.models.load_model(model_path)
+            model_r = tf.keras.models.load_model(model_path, compile=False)
             prep_r = PreprocessArtifacts.load(str(prep_path))
 
             # Select modeling columns needed for this role model.

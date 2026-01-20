@@ -129,7 +129,7 @@ def main() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Load LSTM + preprocessing
-    lstm = tf.keras.models.load_model(str(ensemble_dir / "lstm_model.keras"))
+    lstm = tf.keras.models.load_model(str(ensemble_dir / "lstm_model.keras"), compile=False)
     prep = PreprocessArtifacts.load(str(ensemble_dir / "preprocess.joblib"))
 
     model_horizon = int(lstm.output_shape[-1])
