@@ -27,3 +27,6 @@ site_api/site_data/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Tooling
+.qodo/
