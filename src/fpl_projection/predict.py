@@ -10,7 +10,51 @@ import tensorflow as tf
 from .config import DEFAULT_FEATURE_COLUMNS, DEFAULT_HORIZON, DEFAULT_SEQ_LENGTH, TARGET_COLUMN
 from .data_loading import load_premier_league_gameweek_stats
 from .preprocessing import PreprocessArtifacts, select_and_coerce_numeric, transform_sequences
-from .role_modeling import build_feature_weight_vector, infer_role_from_window, list_roles
+from .role_modeling import (
+    build_feature_weight_vector,
+    infer_mid_subrole_from_window,
+    infer_role_from_window,
+    list_roles,
+    position_to_role,
+)
+
+
+def _latest_per_player(df: pd.DataFrame, *, cols: list[str]) -> pd.DataFrame:
+    keep = [c for c in cols if c in df.columns]
+    if not keep:
+        return pd.DataFrame(columns=cols)
+    out = (
+        df.sort_values(["player_id", "gw"])
+        .groupby("player_id", sort=False, as_index=False)
+        .tail(1)[keep]
+        .copy()
+    )
+    return out
+
+
+def _coalesce_suffix(out: pd.DataFrame, base_cols: list[str], suffix: str) -> pd.DataFrame:
+    for c in base_cols:
+        sc = f"{c}{suffix}"
+        if sc in out.columns:
+            if c in out.columns:
+                out[c] = out[c].combine_first(out[sc])
+            else:
+                out = out.rename(columns={sc: c})
+                continue
+            out = out.drop(columns=[sc])
+    return out
+
+
+def _infer_is_mid_dm(latest_features: pd.DataFrame) -> dict[int, bool]:
+    if latest_features.empty or "player_id" not in latest_features.columns:
+        return {}
+
+    out: dict[int, bool] = {}
+    for _, row in latest_features.iterrows():
+        pid = int(row["player_id"])
+        window = pd.DataFrame([row])
+        out[pid] = infer_mid_subrole_from_window(window) == "MID_DM"
+    return out
 
 
 def main() -> None:
@@ -195,6 +239,17 @@ def main() -> None:
         # Build the last seq_length timesteps per player.
         rows: list[dict] = []
         X_list: list[np.ndarray] = []
+        roles: list[str] = []
+
+        # player_id -> position for role inference
+        pid_to_pos: dict[int, object] = {}
+        if "player_id" in raw.columns and "position" in raw.columns:
+            _meta = (
+                raw.sort_values(["player_id", "gw"]).groupby("player_id", sort=False, as_index=False).tail(1)[
+                    ["player_id", "position"]
+                ]
+            )
+            pid_to_pos = {int(r["player_id"]): r.get("position") for _, r in _meta.iterrows()}
 
         for player_id, g in df.sort_values(["player_id", "gw"]).groupby("player_id", sort=False):
             g = g.sort_values("gw")
@@ -209,12 +264,23 @@ def main() -> None:
             X_list.append(X_window)
             rows.append({"player_id": int(player_id)})
 
+            pos = pid_to_pos.get(int(player_id))
+            role = infer_role_from_window(pos, window[prep.feature_columns], mid_split=args.mid_split)
+            if role is None:
+                role = position_to_role(pos)
+            roles.append(str(role))
+
         if not X_list:
             raise ValueError("No players had enough history to build sequences.")
 
         X = np.stack(X_list, axis=0)
         X = transform_sequences(prep.pipeline, X)
-        X = X * build_feature_weight_vector(prep.feature_columns, "ALL")
+
+        # Apply per-sample role weights
+        uniq = sorted(set(roles))
+        role_to_w = {r: build_feature_weight_vector(prep.feature_columns, r) for r in uniq}
+        W = np.stack([role_to_w.get(r, np.ones(len(prep.feature_columns))) for r in roles], axis=0)
+        X = X * W[:, None, :]
 
         preds = model.predict(X, verbose=0)
         out = pd.DataFrame(rows)
@@ -249,7 +315,7 @@ def main() -> None:
         except Exception:
             pass
 
-    # Attach season-to-date stats from playerstats.csv (latest gw per player)
+    # Attach season-to-date snapshot stats from playerstats.csv (latest gw per player)
     if playerstats_path.exists():
         try:
             stats = pd.read_csv(playerstats_path)
@@ -262,53 +328,50 @@ def main() -> None:
                 stats["player_id"] = stats["player_id"].astype(int)
                 stats["gw"] = stats["gw"].astype(int)
 
-                keep = [
+                # Keep the requested "clean" snapshot fields.
+                requested = [
                     "player_id",
                     "gw",
+                    "first_name",
+                    "second_name",
+                    "web_name",
+                    "chance_of_playing_this_round",
+                    "chance_of_playing_next_round",
+                    "news",
                     "now_cost",
+                    "selected_by_percent",
+                    "value_form",
+                    "value_season",
                     "total_points",
+                    "event_points",
                     "points_per_game",
+                    "form",
+                    "expected_goals_per_90",
+                    "expected_assists_per_90",
+                    "expected_goal_involvements_per_90",
+                    "expected_goals_conceded_per_90",
+                    "influence",
+                    "creativity",
+                    "threat",
+                    "ict_index",
                     "minutes",
-                    "starts",
                     "goals_scored",
                     "assists",
                     "clean_sheets",
-                    "expected_goals",
-                    "expected_assists",
-                    "expected_goal_involvements",
-                    "bonus",
-                    "bps",
-                    "ict_index",
+                    "goals_conceded",
+                    "starts",
+                    "defensive_contribution_per_90",
+                    "tackles",
+                    "clearances_blocks_interceptions",
+                    "recoveries",
                 ]
-                keep = [c for c in keep if c in stats.columns]
-                latest = (
-                    stats.sort_values(["player_id", "gw"]).groupby("player_id", sort=False, as_index=False).tail(1)[
-                        keep
-                    ]
-                )
-                ren = {
-                    "gw": "season_stats_gw",
-                    "now_cost": "price",
-                    "total_points": "season_total_points",
-                    "points_per_game": "season_points_per_game",
-                    "minutes": "season_minutes",
-                    "starts": "season_starts",
-                    "goals_scored": "season_goals_scored",
-                    "assists": "season_assists",
-                    "clean_sheets": "season_clean_sheets",
-                    "expected_goals": "season_xg",
-                    "expected_assists": "season_xa",
-                    "expected_goal_involvements": "season_xgi",
-                    "bonus": "season_bonus",
-                    "bps": "season_bps",
-                    "ict_index": "season_ict_index",
-                }
-                latest = latest.rename(columns={k: v for k, v in ren.items() if k in latest.columns})
-                out = out.merge(latest, on="player_id", how="left")
+                latest_stats = _latest_per_player(stats, cols=requested)
+                out = out.merge(latest_stats, on="player_id", how="left", suffixes=("", "_ps"))
+                out = _coalesce_suffix(out, requested, "_ps")
 
-                # Convert price to £m (FPL now_cost is tenths)
-                if "price" in out.columns:
-                    out["price"] = pd.to_numeric(out["price"], errors="coerce") / 10.0
+                # Provide a stable reference for which snapshot GW these stats come from.
+                if "gw" in out.columns and "season_stats_gw" not in out.columns:
+                    out = out.rename(columns={"gw": "season_stats_gw"})
         except Exception:
             pass
     for i, gw in enumerate(next_gws):
@@ -320,36 +383,96 @@ def main() -> None:
 
     out = out.sort_values(f"GW{next_gws[0]}_proj_points", ascending=False).reset_index(drop=True)
 
+    # Add a "team" alias to match requested output naming.
+    if "club" in out.columns and "team" not in out.columns:
+        out["team"] = out["club"]
+
+    # Apply role-aware masking for DEF/GK-only and DEF/GK/MID-DM-only fields.
+    latest_features = _latest_per_player(raw, cols=[
+        "player_id",
+        "tackles_per_90",
+        "cbi_per_90",
+        "defcon_actions_per_90",
+        "expected_goal_involvements_per_90",
+        "threat",
+        "creativity",
+    ])
+    is_mid_dm = _infer_is_mid_dm(latest_features)
+
+    def _mask_role_fields(frame: pd.DataFrame) -> pd.DataFrame:
+        if "position" not in frame.columns:
+            return frame
+
+        pos = frame["position"].astype(str)
+        is_def_gk = pos.isin(["DEF", "GK"])
+        if "player_id" in frame.columns:
+            mid_dm_mask = pos.eq("MID") & frame["player_id"].map(is_mid_dm).fillna(False)
+        else:
+            mid_dm_mask = pd.Series(False, index=frame.index)
+
+        def_gk_only = ["expected_goals_conceded_per_90"]
+        def_gk_mid_dm_only = [
+            "defensive_contribution_per_90",
+            "tackles",
+            "clearances_blocks_interceptions",
+            "recoveries",
+        ]
+
+        for c in def_gk_only:
+            if c in frame.columns:
+                frame.loc[~is_def_gk, c] = np.nan
+        for c in def_gk_mid_dm_only:
+            if c in frame.columns:
+                frame.loc[~(is_def_gk | mid_dm_mask), c] = np.nan
+        return frame
+
+    out = _mask_role_fields(out)
+
     # Internal CSV keeps player_id for joins (site/streamlit)
     internal_output_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(internal_output_path, index=False)
 
-    # Public CSV: remove player_id and team_code by default, keep club + position + season stats
+    # Public CSV: remove player_id and team_code by default.
     public = out.copy()
     drop_cols = [c for c in ["player_id", "team_code"] if c in public.columns]
     if drop_cols:
         public = public.drop(columns=drop_cols)
 
     preferred_order = [
+        "first_name",
+        "second_name",
         "web_name",
-        "club",
-        "club_name",
         "position",
-        "price",
-        "season_stats_gw",
-        "season_total_points",
-        "season_points_per_game",
-        "season_minutes",
-        "season_starts",
-        "season_goals_scored",
-        "season_assists",
-        "season_clean_sheets",
-        "season_xg",
-        "season_xa",
-        "season_xgi",
-        "season_bps",
-        "season_bonus",
-        "season_ict_index",
+        "team",
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "news",
+        "now_cost",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
+        "expected_goals_conceded_per_90",
+        "influence",
+        "creativity",
+        "threat",
+        "ict_index",
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
+        "defensive_contribution_per_90",
+        "tackles",
+        "clearances_blocks_interceptions",
+        "recoveries",
         "proj_points",
     ]
     proj_cols = [c for c in public.columns if c.startswith("GW") and c.endswith("_proj_points")]

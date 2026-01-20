@@ -206,6 +206,84 @@ def calculate_market_log_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calculate_expected_points_proxy(df: pd.DataFrame) -> pd.DataFrame:
+    """Create a smoother expected-points proxy label per GW.
+
+    Historical gameweek data does not include the official FPL `ep_next/ep_this`
+    for each historical timestep. To reduce noise vs raw `total_points`, we build
+    an expected-points proxy using expected-goals/assists and a simple clean-sheet
+    approximation from expected goals conceded.
+
+    The intent is to emphasize attacking upside (xG/xA) and reduce the model
+    learning that defensive volume + minutes consistency always equals points.
+
+    Output:
+      - xp_proxy: float expected points approximation for that GW
+    """
+    df = df.copy()
+
+    pos_norm = df.get("position", pd.Series(["" for _ in range(len(df))], index=df.index)).astype(str).str.strip().str.lower()
+    is_gk = pos_norm.isin(["goalkeeper", "gk"])
+    is_def = pos_norm.isin(["defender", "def", "df"])
+    is_mid = pos_norm.isin(["midfielder", "mid", "mf"])
+    is_fwd = pos_norm.isin(["forward", "fwd", "fw", "striker"])
+
+    minutes = pd.to_numeric(df.get("minutes", 0.0), errors="coerce").fillna(0.0)
+
+    # Smooth appearance points: approximate 2pts for ~60+ mins.
+    p60 = (minutes / 60.0).clip(lower=0.0, upper=1.0)
+    appearance_pts = 2.0 * p60
+
+    # Prefer expected totals if present; otherwise derive from per-90.
+    if "expected_goals" in df.columns:
+        xg = pd.to_numeric(df.get("expected_goals", 0.0), errors="coerce").fillna(0.0)
+    else:
+        xg90 = pd.to_numeric(df.get("expected_goals_per_90", 0.0), errors="coerce").fillna(0.0)
+        xg = xg90 * (minutes / 90.0)
+
+    if "expected_assists" in df.columns:
+        xa = pd.to_numeric(df.get("expected_assists", 0.0), errors="coerce").fillna(0.0)
+    else:
+        xa90 = pd.to_numeric(df.get("expected_assists_per_90", 0.0), errors="coerce").fillna(0.0)
+        xa = xa90 * (minutes / 90.0)
+
+    if "expected_goals_conceded" in df.columns:
+        xgc = pd.to_numeric(df.get("expected_goals_conceded", 0.0), errors="coerce").fillna(0.0)
+    else:
+        xgc90 = pd.to_numeric(df.get("expected_goals_conceded_per_90", 0.0), errors="coerce").fillna(0.0)
+        xgc = xgc90 * (minutes / 90.0)
+
+    # FPL scoring weights
+    goal_pts = np.select(
+        [is_gk.to_numpy(), is_def.to_numpy(), is_mid.to_numpy(), is_fwd.to_numpy()],
+        [6.0, 6.0, 5.0, 4.0],
+        default=5.0,
+    )
+    assist_pts = 3.0
+
+    cs_pts = np.select(
+        [is_gk.to_numpy(), is_def.to_numpy(), is_mid.to_numpy(), is_fwd.to_numpy()],
+        [4.0, 4.0, 1.0, 0.0],
+        default=1.0,
+    )
+    # Approximate clean sheet probability from xGC (Poisson 0 goals conceded)
+    cs_prob = np.exp(-np.maximum(xgc.to_numpy(dtype=float), 0.0))
+    cs_points = cs_pts * cs_prob * p60.to_numpy(dtype=float)
+
+    # Goals conceded penalty for DEF/GK: -1 per 2 goals conceded (expected)
+    gc_penalty = np.where((is_gk | is_def).to_numpy(), -0.5 * xgc.to_numpy(dtype=float) * p60.to_numpy(dtype=float), 0.0)
+
+    df["xp_proxy"] = (
+        appearance_pts.to_numpy(dtype=float)
+        + goal_pts * xg.to_numpy(dtype=float)
+        + assist_pts * xa.to_numpy(dtype=float)
+        + cs_points
+        + gc_penalty
+    )
+
+    return df
+
+
 def calculate_role_weighted_features(df: pd.DataFrame) -> pd.DataFrame:
     """Create role-aware defensive feature variants.
 
@@ -391,6 +469,7 @@ def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = calculate_defensive_contribution_points(df)
     df = calculate_per_90_metrics(df)
     df = calculate_performance_vs_expectation(df)
+    df = calculate_expected_points_proxy(df)
     df = calculate_rolling_features(df, windows=[3, 5])
     df = calculate_role_weighted_features(df)
     df = calculate_cumulative_features(df)

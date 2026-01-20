@@ -147,6 +147,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--target",
+        default=TARGET_COLUMN,
+        help="Training target column (e.g., total_points or xp_proxy).",
+    )
+    parser.add_argument(
         "--split-by-role",
         action="store_true",
         help="Train separate models per role (GK/DEF/MID/FWD). Saves under artifacts/models/<role>/.",
@@ -193,33 +198,29 @@ def main() -> None:
     available_features = _get_available_features(raw, DEFAULT_FEATURE_COLUMNS)
     print(f"Using {len(available_features)} features for training")
 
+    target_col = str(args.target)
     # Select and coerce numeric data
-    df = select_and_coerce_numeric(raw, available_features, TARGET_COLUMN)
+    df = select_and_coerce_numeric(raw, available_features, target_col)
     
     print(f"Building sequences with seq_length={args.seq_length}, horizon={args.horizon}")
     dataset = build_sequences(
         df=df,
         feature_columns=available_features,
-        target_column=TARGET_COLUMN,
+        target_column=target_col,
         seq_length=args.seq_length,
         horizon=args.horizon,
     )
 
     # Determine role for each sequence (based on player position + last-timestep stats)
-    roles_for_seq: np.ndarray
-    if args.split_by_role:
-        role_labels: list[str] = []
-        for i in range(dataset.X.shape[0]):
-            pid = int(dataset.player_id[i])
-            pos = pid_to_pos.get(pid)
-            role = infer_role_from_window(pos, pd.DataFrame(dataset.X[i], columns=available_features), mid_split=args.mid_split)
-            # For unknown positions, fall back to base mapping.
-            if role is None:
-                role = position_to_role(pos)
-            role_labels.append(role)
-        roles_for_seq = np.asarray(role_labels, dtype=object)
-    else:
-        roles_for_seq = np.asarray(["ALL"] * dataset.X.shape[0], dtype=object)
+    role_labels: list[str] = []
+    for i in range(dataset.X.shape[0]):
+        pid = int(dataset.player_id[i])
+        pos = pid_to_pos.get(pid)
+        role = infer_role_from_window(pos, pd.DataFrame(dataset.X[i], columns=available_features), mid_split=args.mid_split)
+        if role is None:
+            role = position_to_role(pos)
+        role_labels.append(role)
+    roles_for_seq = np.asarray(role_labels, dtype=object)
 
     max_end_gw = int(dataset.end_gw.max())
     # Ensure some room: train | val | test in time order
@@ -237,15 +238,15 @@ def main() -> None:
         train_max_end_gw=train_max_end_gw,
         val_max_end_gw=val_max_end_gw,
     )
-    if args.split_by_role:
-        train_roles, val_roles, test_roles = split_by_end_gw(
-            type("_R", (), {"X": roles_for_seq, "y": roles_for_seq, "player_id": roles_for_seq, "end_gw": dataset.end_gw})(),
-            train_max_end_gw=train_max_end_gw,
-            val_max_end_gw=val_max_end_gw,
-        )
-        train_roles = train_roles.X
-        val_roles = val_roles.X
-        test_roles = test_roles.X
+    # Split roles alongside the dataset splits so we can apply per-sample weights.
+    train_roles, val_roles, test_roles = split_by_end_gw(
+        type("_R", (), {"X": roles_for_seq, "y": roles_for_seq, "player_id": roles_for_seq, "end_gw": dataset.end_gw})(),
+        train_max_end_gw=train_max_end_gw,
+        val_max_end_gw=val_max_end_gw,
+    )
+    train_roles = train_roles.X
+    val_roles = val_roles.X
+    test_roles = test_roles.X
     
     print(f"Dataset sizes - Train: {len(train_ds.X)}, Val: {len(val_ds.X)}, Test: {len(test_ds.X)}")
 
@@ -312,6 +313,7 @@ def main() -> None:
             "season": args.season,
             "seq_length": args.seq_length,
             "horizon": args.horizon,
+            "target_column": target_col,
             "num_features": int(n_features),
             "feature_columns": feature_cols,
             "test_loss": float(test_loss),
@@ -396,11 +398,17 @@ def main() -> None:
     X_val = transform_sequences(pipeline, val_ds.X)
     X_test = transform_sequences(pipeline, test_ds.X)
 
-    # Apply conservative ALL-role weights as a light guardrail.
-    w_all = build_feature_weight_vector(available_features, "ALL")
-    X_train = X_train * w_all
-    X_val = X_val * w_all
-    X_test = X_test * w_all
+    # Apply per-sample role-aware weights (strong guardrail against DM/consistency bias).
+    unique_roles = sorted(set(str(r) for r in np.unique(np.concatenate([train_roles, val_roles, test_roles]))))
+    role_to_w = {r: build_feature_weight_vector(available_features, r) for r in unique_roles}
+
+    def _apply_role_weights(X: np.ndarray, roles: np.ndarray) -> np.ndarray:
+        W = np.stack([role_to_w.get(str(r), np.ones(X.shape[-1])) for r in roles], axis=0)
+        return X * W[:, None, :]
+
+    X_train = _apply_role_weights(X_train, train_roles)
+    X_val = _apply_role_weights(X_val, val_roles)
+    X_test = _apply_role_weights(X_test, test_roles)
 
     print(f"Building LSTM model (seq_length={args.seq_length}, features={n_features}, horizon={args.horizon})")
     model = build_lstm_model(seq_length=args.seq_length, num_features=n_features, horizon=args.horizon)
@@ -438,6 +446,7 @@ def main() -> None:
         "season": args.season,
         "seq_length": args.seq_length,
         "horizon": args.horizon,
+        "target_column": target_col,
         "num_features": n_features,
         "feature_columns": available_features,
         "test_loss": float(test_loss),

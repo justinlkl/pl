@@ -11,6 +11,45 @@ import tensorflow as tf
 from .config import DEFAULT_FEATURE_COLUMNS, DEFAULT_HORIZON, DEFAULT_SEQ_LENGTH, TARGET_COLUMN
 from .data_loading import load_premier_league_gameweek_stats
 from .preprocessing import PreprocessArtifacts, select_and_coerce_numeric, transform_sequences
+from .role_modeling import build_feature_weight_vector, infer_mid_subrole_from_window, infer_role_from_window, position_to_role
+
+
+def _latest_per_player(df: pd.DataFrame, *, cols: list[str]) -> pd.DataFrame:
+    keep = [c for c in cols if c in df.columns]
+    if not keep:
+        return pd.DataFrame(columns=cols)
+    out = (
+        df.sort_values(["player_id", "gw"])
+        .groupby("player_id", sort=False, as_index=False)
+        .tail(1)[keep]
+        .copy()
+    )
+    return out
+
+
+def _coalesce_suffix(out: pd.DataFrame, base_cols: list[str], suffix: str) -> pd.DataFrame:
+    for c in base_cols:
+        sc = f"{c}{suffix}"
+        if sc in out.columns:
+            if c in out.columns:
+                out[c] = out[c].combine_first(out[sc])
+            else:
+                out = out.rename(columns={sc: c})
+                continue
+            out = out.drop(columns=[sc])
+    return out
+
+
+def _infer_is_mid_dm(latest_features: pd.DataFrame) -> dict[int, bool]:
+    if latest_features.empty or "player_id" not in latest_features.columns:
+        return {}
+
+    out: dict[int, bool] = {}
+    for _, row in latest_features.iterrows():
+        pid = int(row["player_id"])
+        window = pd.DataFrame([row])
+        out[pid] = infer_mid_subrole_from_window(window) == "MID_DM"
+    return out
 
 
 def _require_pycaret() -> None:
@@ -46,6 +85,11 @@ def main() -> None:
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
     parser.add_argument("--seq-length", type=int, default=DEFAULT_SEQ_LENGTH)
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON)
+    parser.add_argument(
+        "--mid-split",
+        action="store_true",
+        help="Use a heuristic to split MID into MID_DM vs MID_AM for role weights/masking.",
+    )
 
     parser.add_argument(
         "--lstm-only",
@@ -94,6 +138,16 @@ def main() -> None:
     rows: list[dict] = []
     X_list: list[np.ndarray] = []
     last_feature_rows: list[np.ndarray] = []
+    roles: list[str] = []
+
+    pid_to_pos: dict[int, object] = {}
+    if "player_id" in raw.columns and "position" in raw.columns:
+        meta_pos = (
+            raw.sort_values(["player_id", "gw"]).groupby("player_id", sort=False, as_index=False).tail(1)[
+                ["player_id", "position"]
+            ]
+        )
+        pid_to_pos = {int(r["player_id"]): r.get("position") for _, r in meta_pos.iterrows()}
 
     for player_id, g in df.sort_values(["player_id", "gw"]).groupby("player_id", sort=False):
         g = g.sort_values("gw")
@@ -112,11 +166,23 @@ def main() -> None:
         name = str(web_name.iloc[-1]) if len(web_name) else ""
         rows.append({"player_id": int(player_id), "web_name": name})
 
+        pos = pid_to_pos.get(int(player_id))
+        role = infer_role_from_window(pos, window[prep.feature_columns], mid_split=bool(args.mid_split))
+        if role is None:
+            role = position_to_role(pos)
+        roles.append(str(role))
+
     if not X_list:
         raise ValueError("No players had enough history to build sequences.")
 
     X = np.stack(X_list, axis=0)
     X = transform_sequences(prep.pipeline, X)
+
+    # Apply per-sample role weights
+    uniq = sorted(set(roles))
+    role_to_w = {r: build_feature_weight_vector(prep.feature_columns, r) for r in uniq}
+    W = np.stack([role_to_w.get(r, np.ones(len(prep.feature_columns))) for r in roles], axis=0)
+    X = X * W[:, None, :]
 
     lstm_preds = lstm.predict(X, verbose=0)
 
@@ -142,6 +208,159 @@ def main() -> None:
             out[f"GW{gw}_proj_points"] = pred_df["prediction_label"].to_numpy(dtype=float)
 
     out = out.sort_values(f"GW{next_gws[0]}_proj_points", ascending=False).reset_index(drop=True)
+
+    # Enrich output with teams + playerstats snapshot fields to match projections.csv.
+    insights_root = repo_root / "FPL-Core-Insights" / "data" / args.season
+    teams_path = insights_root / "teams.csv"
+    playerstats_path = insights_root / "playerstats.csv"
+
+    # Attach latest position/team_code from raw for role masking + team join.
+    meta_cols = [c for c in ["player_id", "team_code", "position"] if c in raw.columns]
+    if meta_cols:
+        meta = (
+            raw.sort_values(["player_id", "gw"])  # type: ignore[arg-type]
+            .groupby("player_id", sort=False, as_index=False)
+            .tail(1)[meta_cols]
+            .copy()
+        )
+        out = out.merge(meta, on="player_id", how="left")
+
+    # team_code -> club short_name
+    if teams_path.exists() and "team_code" in out.columns:
+        try:
+            teams = pd.read_csv(teams_path)
+            teams = teams[[c for c in ["code", "short_name", "name"] if c in teams.columns]].copy()
+            teams["code"] = pd.to_numeric(teams.get("code"), errors="coerce").astype("Int64")
+            out["team_code"] = pd.to_numeric(out.get("team_code"), errors="coerce").astype("Int64")
+            out = out.merge(teams, left_on="team_code", right_on="code", how="left")
+            out = out.drop(columns=[c for c in ["code"] if c in out.columns])
+            if "short_name" in out.columns:
+                out = out.rename(columns={"short_name": "team"})
+        except Exception:
+            pass
+
+    if playerstats_path.exists():
+        try:
+            stats = pd.read_csv(playerstats_path)
+            if "id" in stats.columns and "player_id" not in stats.columns:
+                stats = stats.rename(columns={"id": "player_id"})
+
+            if "player_id" in stats.columns and "gw" in stats.columns:
+                stats["player_id"] = pd.to_numeric(stats["player_id"], errors="coerce").astype("Int64")
+                stats["gw"] = pd.to_numeric(stats["gw"], errors="coerce").astype("Int64")
+                stats = stats.dropna(subset=["player_id", "gw"]).copy()
+                stats["player_id"] = stats["player_id"].astype(int)
+                stats["gw"] = stats["gw"].astype(int)
+
+                requested = [
+                    "player_id",
+                    "gw",
+                    "first_name",
+                    "second_name",
+                    "web_name",
+                    "chance_of_playing_this_round",
+                    "chance_of_playing_next_round",
+                    "news",
+                    "now_cost",
+                    "selected_by_percent",
+                    "value_form",
+                    "value_season",
+                    "total_points",
+                    "event_points",
+                    "points_per_game",
+                    "form",
+                    "expected_goals_per_90",
+                    "expected_assists_per_90",
+                    "expected_goal_involvements_per_90",
+                    "expected_goals_conceded_per_90",
+                    "influence",
+                    "creativity",
+                    "threat",
+                    "ict_index",
+                    "minutes",
+                    "goals_scored",
+                    "assists",
+                    "clean_sheets",
+                    "goals_conceded",
+                    "starts",
+                    "defensive_contribution_per_90",
+                    "tackles",
+                    "clearances_blocks_interceptions",
+                    "recoveries",
+                ]
+                latest_stats = _latest_per_player(stats, cols=requested)
+                out = out.merge(latest_stats, on="player_id", how="left", suffixes=("", "_ps"))
+                out = _coalesce_suffix(out, requested, "_ps")
+                if "gw" in out.columns and "season_stats_gw" not in out.columns:
+                    out = out.rename(columns={"gw": "season_stats_gw"})
+        except Exception:
+            pass
+
+    # Role-aware masking
+    latest_features = _latest_per_player(raw, cols=[
+        "player_id",
+        "tackles_per_90",
+        "cbi_per_90",
+        "defcon_actions_per_90",
+        "expected_goal_involvements_per_90",
+        "threat",
+        "creativity",
+    ])
+    is_mid_dm = _infer_is_mid_dm(latest_features)
+
+    if "position" in out.columns:
+        pos = out["position"].astype(str)
+        is_def_gk = pos.isin(["DEF", "GK"])
+        mid_dm_mask = pos.eq("MID") & out["player_id"].map(is_mid_dm).fillna(False)
+
+        if "expected_goals_conceded_per_90" in out.columns:
+            out.loc[~is_def_gk, "expected_goals_conceded_per_90"] = np.nan
+        for c in ["defensive_contribution_per_90", "tackles", "clearances_blocks_interceptions", "recoveries"]:
+            if c in out.columns:
+                out.loc[~(is_def_gk | mid_dm_mask), c] = np.nan
+
+    # Put requested fields first (then projections)
+    preferred_order = [
+        "first_name",
+        "second_name",
+        "web_name",
+        "position",
+        "team",
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "news",
+        "now_cost",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
+        "expected_goals_conceded_per_90",
+        "influence",
+        "creativity",
+        "threat",
+        "ict_index",
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
+        "defensive_contribution_per_90",
+        "tackles",
+        "clearances_blocks_interceptions",
+        "recoveries",
+    ]
+    proj_cols = [c for c in out.columns if c.startswith("GW") and c.endswith("_proj_points")]
+    ordered = [c for c in preferred_order if c in out.columns] + [c for c in proj_cols if c in out.columns]
+    ordered += [c for c in out.columns if c not in set(ordered)]
+    out = out[ordered]
+
     out.to_csv(output_path, index=False)
     print(f"Wrote ensemble projections: {output_path}")
 
