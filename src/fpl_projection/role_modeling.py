@@ -15,6 +15,40 @@ ROLE_MID_DM = "MID_DM"
 ROLE_MID_AM = "MID_AM"
 
 
+# Post-model calibration multipliers (applied to projected points AFTER prediction/stacking).
+# These help align the absolute scale and positional distributions with commercial tools.
+ROLE_PROJECTION_MULTIPLIER: dict[str, float] = {
+    ROLE_FWD: 1.25,
+    ROLE_MID_AM: 1.15,
+    ROLE_MID: 1.10,
+    ROLE_MID_DM: 0.70,
+    ROLE_DEF: 1.05,
+    ROLE_GK: 1.00,
+}
+
+
+def role_projection_multiplier(role: Any, *, overrides: dict[str, float] | None = None) -> float:
+    r = str(role or "").strip()
+    if overrides and r in overrides:
+        try:
+            return float(overrides[r])
+        except Exception:
+            return 1.0
+    return float(ROLE_PROJECTION_MULTIPLIER.get(r, 1.0))
+
+
+def scale_projection_matrix(
+    preds: np.ndarray,
+    roles: list[str] | np.ndarray,
+    *,
+    overrides: dict[str, float] | None = None,
+) -> np.ndarray:
+    """Scale an (n_players, horizon) prediction matrix by per-player role multipliers."""
+    roles_arr = np.asarray(roles, dtype=object)
+    mult = np.asarray([role_projection_multiplier(r, overrides=overrides) for r in roles_arr], dtype=float)
+    return preds * mult.reshape(-1, 1)
+
+
 def _norm_pos(v: Any) -> str:
     return str(v or "").strip().lower()
 

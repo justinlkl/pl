@@ -16,6 +16,7 @@ from .role_modeling import (
     infer_role_from_window,
     list_roles,
     position_to_role,
+    scale_projection_matrix,
 )
 
 
@@ -74,6 +75,11 @@ def main() -> None:
         "--mid-split",
         action="store_true",
         help="If role models exist, split MID into MID_DM/MID_AM using a heuristic.",
+    )
+    parser.add_argument(
+        "--no-role-scaling",
+        action="store_true",
+        help="Disable post-model role-based projection scaling multipliers.",
     )
     parser.add_argument(
         "--internal-output",
@@ -298,6 +304,39 @@ def main() -> None:
             meta["position"] = meta["position"].apply(_pos_to_abbrev)
         out = out.merge(meta, on="player_id", how="left")
 
+    # ---- Role-adjusted global scaling (post-model calibration) ----
+    # Compute MID_DM vs MID_AM for midfielders using last-timestep engineered features.
+    latest_features = _latest_per_player(
+        raw,
+        cols=[
+            "player_id",
+            "tackles_per_90",
+            "cbi_per_90",
+            "defcon_actions_per_90",
+            "expected_goal_involvements_per_90",
+            "threat",
+            "creativity",
+        ],
+    )
+    is_mid_dm = _infer_is_mid_dm(latest_features)
+
+    # Derive a role label for scaling (always splits MID into MID_DM/MID_AM).
+    if "position" in out.columns and "player_id" in out.columns:
+        pos = out["position"].astype(str)
+        role_scale = pos.copy()
+        mid_mask = pos.eq("MID")
+        role_scale.loc[mid_mask] = np.where(
+            out.loc[mid_mask, "player_id"].map(is_mid_dm).fillna(False).to_numpy(),
+            "MID_DM",
+            "MID_AM",
+        )
+        out["role"] = role_scale
+    else:
+        out["role"] = ""
+
+    if not args.no_role_scaling:
+        preds = scale_projection_matrix(preds, out["role"].to_numpy(dtype=object))
+
     # Attach club short/full names from teams.csv (team_code -> short_name/name)
     if teams_path.exists() and "team_code" in out.columns:
         try:
@@ -388,17 +427,6 @@ def main() -> None:
         out["team"] = out["club"]
 
     # Apply role-aware masking for DEF/GK-only and DEF/GK/MID-DM-only fields.
-    latest_features = _latest_per_player(raw, cols=[
-        "player_id",
-        "tackles_per_90",
-        "cbi_per_90",
-        "defcon_actions_per_90",
-        "expected_goal_involvements_per_90",
-        "threat",
-        "creativity",
-    ])
-    is_mid_dm = _infer_is_mid_dm(latest_features)
-
     def _mask_role_fields(frame: pd.DataFrame) -> pd.DataFrame:
         if "position" not in frame.columns:
             return frame
@@ -434,7 +462,7 @@ def main() -> None:
 
     # Public CSV: remove player_id and team_code by default.
     public = out.copy()
-    drop_cols = [c for c in ["player_id", "team_code"] if c in public.columns]
+    drop_cols = [c for c in ["player_id", "team_code", "role"] if c in public.columns]
     if drop_cols:
         public = public.drop(columns=drop_cols)
 

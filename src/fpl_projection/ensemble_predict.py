@@ -11,7 +11,13 @@ import tensorflow as tf
 from .config import DEFAULT_FEATURE_COLUMNS, DEFAULT_HORIZON, DEFAULT_SEQ_LENGTH, TARGET_COLUMN
 from .data_loading import load_premier_league_gameweek_stats
 from .preprocessing import PreprocessArtifacts, select_and_coerce_numeric, transform_sequences
-from .role_modeling import build_feature_weight_vector, infer_mid_subrole_from_window, infer_role_from_window, position_to_role
+from .role_modeling import (
+    build_feature_weight_vector,
+    infer_mid_subrole_from_window,
+    infer_role_from_window,
+    position_to_role,
+    scale_projection_matrix,
+)
 
 
 def _latest_per_player(df: pd.DataFrame, *, cols: list[str]) -> pd.DataFrame:
@@ -89,6 +95,11 @@ def main() -> None:
         "--mid-split",
         action="store_true",
         help="Use a heuristic to split MID into MID_DM vs MID_AM for role weights/masking.",
+    )
+    parser.add_argument(
+        "--no-role-scaling",
+        action="store_true",
+        help="Disable post-model role-based projection scaling multipliers.",
     )
 
     parser.add_argument(
@@ -207,8 +218,6 @@ def main() -> None:
             pred_df = predict_model(stack, data=tab)
             out[f"GW{gw}_proj_points"] = pred_df["prediction_label"].to_numpy(dtype=float)
 
-    out = out.sort_values(f"GW{next_gws[0]}_proj_points", ascending=False).reset_index(drop=True)
-
     # Enrich output with teams + playerstats snapshot fields to match projections.csv.
     insights_root = repo_root / "FPL-Core-Insights" / "data" / args.season
     teams_path = insights_root / "teams.csv"
@@ -224,6 +233,37 @@ def main() -> None:
             .copy()
         )
         out = out.merge(meta, on="player_id", how="left")
+
+    # ---- Role-adjusted global scaling (post-model calibration) ----
+    latest_features = _latest_per_player(raw, cols=[
+        "player_id",
+        "tackles_per_90",
+        "cbi_per_90",
+        "defcon_actions_per_90",
+        "expected_goal_involvements_per_90",
+        "threat",
+        "creativity",
+    ])
+    is_mid_dm = _infer_is_mid_dm(latest_features)
+
+    if "position" in out.columns and "player_id" in out.columns:
+        pos = out["position"].astype(str)
+        role_scale = pos.copy()
+        mid_mask = pos.eq("MID")
+        role_scale.loc[mid_mask] = np.where(
+            out.loc[mid_mask, "player_id"].map(is_mid_dm).fillna(False).to_numpy(),
+            "MID_DM",
+            "MID_AM",
+        )
+        out["role"] = role_scale
+    else:
+        out["role"] = ""
+
+    if not args.no_role_scaling:
+        gw_cols = [c for c in out.columns if c.startswith("GW") and c.endswith("_proj_points")]
+        if gw_cols:
+            scaled = scale_projection_matrix(out[gw_cols].to_numpy(dtype=float), out["role"].to_numpy(dtype=object))
+            out.loc[:, gw_cols] = scaled
 
     # team_code -> club short_name
     if teams_path.exists() and "team_code" in out.columns:
@@ -297,17 +337,6 @@ def main() -> None:
             pass
 
     # Role-aware masking
-    latest_features = _latest_per_player(raw, cols=[
-        "player_id",
-        "tackles_per_90",
-        "cbi_per_90",
-        "defcon_actions_per_90",
-        "expected_goal_involvements_per_90",
-        "threat",
-        "creativity",
-    ])
-    is_mid_dm = _infer_is_mid_dm(latest_features)
-
     if "position" in out.columns:
         pos = out["position"].astype(str)
         is_def_gk = pos.isin(["DEF", "GK"])
@@ -318,6 +347,10 @@ def main() -> None:
         for c in ["defensive_contribution_per_90", "tackles", "clearances_blocks_interceptions", "recoveries"]:
             if c in out.columns:
                 out.loc[~(is_def_gk | mid_dm_mask), c] = np.nan
+
+    # Sort after scaling so ranking reflects calibrated outputs.
+    if next_gws:
+        out = out.sort_values(f"GW{next_gws[0]}_proj_points", ascending=False).reset_index(drop=True)
 
     # Put requested fields first (then projections)
     preferred_order = [
