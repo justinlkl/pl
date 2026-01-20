@@ -2,7 +2,9 @@
 
 This project trains an LSTM-based time-series model to predict Fantasy Premier League (FPL) player **projection points** for the next gameweeks.
 
-It uses the dataset from the included subfolder `FPL-Core-Insights/` (cloned from https://github.com/olbauday/FPL-Core-Insights).
+It uses the dataset from `FPL-Core-Insights/` (cloned from https://github.com/olbauday/FPL-Core-Insights).
+
+Note: `FPL-Core-Insights/`, `artifacts/`, and `outputs/` are treated as local data/build outputs and are git-ignored.
 
 ## Pipeline
 
@@ -11,7 +13,15 @@ It uses the dataset from the included subfolder `FPL-Core-Insights/` (cloned fro
 - **Missing data**: median imputation per feature
 - **Normalization**: standard scaling per feature
 - **Sequences**: 5-gameweek windows per player
-- **Model**: LSTM(64, tanh) → Dropout(0.2) → Dense(32, relu) → Dense(horizon)
+- **Model**: 2-layer LSTM → Dense → multi-horizon regression head
+- **Targets**:
+	- `xp_proxy`: smoother expected-points proxy from xG/xA + simple CS approximation
+	- `xp_blend`: `0.7*xp_proxy + 0.3*total_points` (recommended default)
+- **Anti-DM bias guardrails**:
+	- Role-aware feature weighting (downweights MID_DM defensive stability signals)
+	- Role-weighted loss during training (attacker errors cost more)
+	- Optional xGI overprediction penalty (discourages projecting low-xGI players too high)
+	- Post-model role scaling at inference time (calibration vs. typical positional distributions)
 
 ## Quickstart
 
@@ -32,14 +42,22 @@ C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m pip install -r require
 2) Train
 
 ```powershell
-C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m fpl_projection.train --season 2025-2026 --seq-length 5 --horizon 6
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m src.fpl_projection.train --season 2025-2026 --seq-length 5 --horizon 6 --target xp_blend --mid-split --bias-penalty-alpha 0.3
 ```
+
+Useful flags:
+- `--target xp_blend` (default recommendation) or `--target xp_proxy`
+- `--bias-penalty-alpha 0.3` to add `alpha * ReLU(pred - xGI_cap)` penalty (0 disables)
+- `--no-role-loss-weighting` to disable per-role sample weights
+- `--monitor val_macro_mse` (default) to early-stop on per-role macro validation MSE
 
 3) Predict (writes a projection table)
 
 ```powershell
-C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m fpl_projection.predict --season 2025-2026 --horizon 6
+C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m src.fpl_projection.predict --season 2025-2026 --horizon 6 --mid-split
 ```
+
+By default, predictions apply post-model role scaling for calibration. Disable with `--no-role-scaling`.
 
 Outputs:
 - `artifacts/model.keras`
@@ -81,3 +99,12 @@ Endpoints:
 ## Notes
 
 - The model predicts points purely from historical player/gameweek stats (plus context columns present in the dataset). It does not simulate future fixtures unless those fixture-context columns are present in the data.
+
+## Data setup
+
+If `FPL-Core-Insights/` is missing, clone it into the repo root:
+
+```powershell
+Set-Location c:\Users\justinlam\Desktop\pl
+git clone https://github.com/olbauday/FPL-Core-Insights.git
+```
