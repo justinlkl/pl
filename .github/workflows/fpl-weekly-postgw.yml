@@ -1,0 +1,146 @@
+name: Weekly Update (Post-Gameweek)
+
+on:
+  # GW end times vary; poll periodically and only run when GW is finalized.
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fpl-postgw
+  cancel-in-progress: true
+
+env:
+  DATA_REPO_URL: https://github.com/olbauday/FPL-Core-Insights.git
+  DATA_BRANCH: main
+  PYTHON_VERSION: '3.10'
+  SEASON: '2025-2026'
+  TARGET: 'xp_blend'
+
+jobs:
+  post-gw-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check if current GW is finalized
+        id: gw
+        run: |
+          python scripts/fpl_gameweek_gate.py --write-github-output
+
+      - name: Stop (GW not finalized yet)
+        if: steps.gw.outputs.should_run != 'true'
+        run: |
+          echo "GW gate: should_run=${{ steps.gw.outputs.should_run }}"
+          echo "current_gw=${{ steps.gw.outputs.current_gw }} next_gw=${{ steps.gw.outputs.next_gw }}"
+          echo "finished=${{ steps.gw.outputs.finished }} data_checked=${{ steps.gw.outputs.data_checked }} already_processed=${{ steps.gw.outputs.already_processed }}"
+          exit 0
+
+      - name: Sync FPL-Core-Insights dataset
+        if: steps.gw.outputs.should_run == 'true'
+        run: |
+          set -e
+          echo "📥 Syncing FPL-Core-Insights..."
+
+          if [ -d "FPL-Core-Insights/.git" ]; then
+            git -C FPL-Core-Insights fetch --depth=1 origin ${DATA_BRANCH}
+            git -C FPL-Core-Insights reset --hard FETCH_HEAD
+          else
+            rm -rf FPL-Core-Insights
+            git clone --depth 1 --branch ${DATA_BRANCH} ${DATA_REPO_URL} FPL-Core-Insights
+          fi
+
+          echo "✓ Data synced"
+          echo "Latest data commit: $(git -C FPL-Core-Insights rev-parse --short HEAD)"
+
+      - name: Train ensemble using latest finished GW
+        if: steps.gw.outputs.should_run == 'true'
+        run: |
+          set -e
+          echo "🤖 Training ensemble (weekly post-GW refresh)..."
+          python -m src.fpl_projection.ensemble_train \
+            --season "${SEASON}" \
+            --target "${TARGET}" \
+            --mid-split \
+            --backend sklearn \
+            --epochs 25 \
+            --artifacts-dir artifacts_ci \
+            --out-dir artifacts_ci/ensemble
+
+      - name: Predict next gameweek (drops current GW projections)
+        if: steps.gw.outputs.should_run == 'true'
+        run: |
+          set -e
+          echo "📈 Predicting next GW: ${{ steps.gw.outputs.next_gw }}"
+          python -m src.fpl_projection.ensemble_predict \
+            --season "${SEASON}" \
+            --mid-split \
+            --backend sklearn \
+            --ensemble-dir artifacts_ci/ensemble \
+            --start-gw ${{ steps.gw.outputs.next_gw }}
+
+      - name: Regenerate static site JSON
+        if: steps.gw.outputs.should_run == 'true'
+        run: |
+          set -e
+          python scripts/generate_site.py
+
+      - name: Mark GW processed
+        if: steps.gw.outputs.should_run == 'true'
+        run: |
+          set -e
+          python scripts/fpl_gameweek_gate.py --mark-processed
+
+      - name: Commit and push updated outputs
+        if: steps.gw.outputs.should_run == 'true'
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            outputs/projections.csv \
+            outputs/projections_internal.csv \
+            site/data/projections.json \
+            site/projections.json \
+            artifacts/last_postgw_event.json
+
+          if git diff --cached --quiet; then
+            echo "✓ No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "📅 Post-GW update: GW${{ steps.gw.outputs.current_gw }} → GW${{ steps.gw.outputs.next_gw }}"
+          git push
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgw-${{ github.run_id }}
+          path: |
+            outputs/projections.csv
+            outputs/projections_internal.csv
+            site/data/projections.json
+            site/projections.json
+            artifacts/last_postgw_event.json
+          retention-days: 14
