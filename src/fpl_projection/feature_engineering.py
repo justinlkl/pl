@@ -66,8 +66,11 @@ def calculate_defensive_contribution_points(df: pd.DataFrame) -> pd.DataFrame:
     threshold = np.where((is_def | is_gk).to_numpy(), 10.0, np.where(is_mid_fwd.to_numpy(), 12.0, np.nan))
 
     df["defcon_actions"] = actions
-    steps = np.where(np.isfinite(threshold) & (threshold > 0), np.floor(actions.to_numpy(dtype=float) / threshold), 0.0)
-    df["defcon_points"] = steps.astype(float) * 2.0
+    # Per-match threshold: award 2 pts once when meeting threshold.
+    # (DEF/GK >=10 actions => +2, MID/FWD >=12 actions => +2)
+    eligible = np.isfinite(threshold) & (threshold > 0)
+    met = np.where(eligible, actions.to_numpy(dtype=float) >= threshold, False)
+    df["defcon_points"] = met.astype(float) * 2.0
     return df
 
 

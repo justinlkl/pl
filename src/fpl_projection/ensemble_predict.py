@@ -556,6 +556,38 @@ def main() -> None:
     ])
     is_mid_dm = _infer_is_mid_dm(latest_features)
 
+    # Defensive snapshot fields (prefer engineered raw; playerstats.csv may not include these)
+    latest_def = _latest_per_player(
+        raw,
+        cols=[
+            "player_id",
+            "minutes",
+            "tackles",
+            "clearances_blocks_interceptions",
+            "recoveries",
+            "defensive_contribution",
+            "defcon_actions",
+            "defcon_actions_per_90",
+        ],
+    )
+    if "defensive_contribution" not in latest_def.columns and "defcon_actions" in latest_def.columns:
+        latest_def["defensive_contribution"] = latest_def["defcon_actions"]
+    if "defensive_contribution_per_90" not in latest_def.columns and "defcon_actions_per_90" in latest_def.columns:
+        latest_def["defensive_contribution_per_90"] = latest_def["defcon_actions_per_90"]
+    if "player_id" in latest_def.columns:
+        out = out.merge(latest_def, on="player_id", how="left", suffixes=("", "_raw"))
+        out = _coalesce_suffix(
+            out,
+            [
+                "defensive_contribution",
+                "defensive_contribution_per_90",
+                "tackles",
+                "clearances_blocks_interceptions",
+                "recoveries",
+            ],
+            "_raw",
+        )
+
     if "position" in out.columns and "player_id" in out.columns:
         pos = out["position"].astype(str)
         role_scale = pos.copy()
@@ -684,9 +716,7 @@ def main() -> None:
 
         if "expected_goals_conceded_per_90" in out.columns:
             out.loc[~is_def_gk, "expected_goals_conceded_per_90"] = np.nan
-        for c in ["defensive_contribution_per_90", "tackles", "clearances_blocks_interceptions", "recoveries"]:
-            if c in out.columns:
-                out.loc[~(is_def_gk | mid_dm_mask), c] = np.nan
+        # Defensive raw stats are useful to view across all positions (MID/FWD can score defcon points too).
 
     # Add opponent labels for each projected GW (best-effort).
     if "team_code" in out.columns and next_gws:
@@ -770,6 +800,7 @@ def main() -> None:
         "clean_sheets",
         "goals_conceded",
         "starts",
+        "defensive_contribution",
         "defensive_contribution_per_90",
         "tackles",
         "clearances_blocks_interceptions",

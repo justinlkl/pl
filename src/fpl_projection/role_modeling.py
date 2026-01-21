@@ -338,7 +338,7 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
     },
     ROLE_MID_DM: {
         # Defensive stability should not dominate MID scoring.
-        "defcon_points_mid": 0.2,
+        "defcon_points_mid": 0.45,
         "defcon_actions_per_90_mid": 0.2,
         "cbi_per_90_mid": 0.15,
         "tackles_per_90_mid": 0.2,
@@ -373,7 +373,7 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
     },
     ROLE_MID_AM: {
         # Strongly down-weight defensive for AM/Wing
-        "defcon_points_mid": 0.05,
+        "defcon_points_mid": 0.25,
         "defcon_actions_per_90_mid": 0.08,
         "cbi_per_90_mid": 0.06,
         "tackles_per_90_mid": 0.08,
@@ -412,7 +412,7 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
     },
     ROLE_MID: {
         # If not splitting mids, use a conservative midpoint.
-        "defcon_points_mid": 0.1,
+        "defcon_points_mid": 0.35,
         "defcon_actions_per_90_mid": 0.12,
         "cbi_per_90_mid": 0.1,
         "tackles_per_90_mid": 0.12,
@@ -442,7 +442,7 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
     },
     ROLE_FWD: {
         # Down-weight defensive
-        "defcon_points_fwd": 0.05,
+        "defcon_points_fwd": 0.2,
         "defcon_actions_per_90_fwd": 0.06,
         "cbi_per_90_fwd": 0.05,
         "tackles_per_90_fwd": 0.06,

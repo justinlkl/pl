@@ -415,6 +415,38 @@ def main() -> None:
                     out = out.rename(columns={"gw": "season_stats_gw"})
         except Exception:
             pass
+
+    # Defensive snapshot fields (prefer engineered raw; playerstats.csv may not include these)
+    latest_def = _latest_per_player(
+        raw,
+        cols=[
+            "player_id",
+            "minutes",
+            "tackles",
+            "clearances_blocks_interceptions",
+            "recoveries",
+            "defensive_contribution",
+            "defcon_actions",
+            "defcon_actions_per_90",
+        ],
+    )
+    if "defensive_contribution" not in latest_def.columns and "defcon_actions" in latest_def.columns:
+        latest_def["defensive_contribution"] = latest_def["defcon_actions"]
+    if "defensive_contribution_per_90" not in latest_def.columns and "defcon_actions_per_90" in latest_def.columns:
+        latest_def["defensive_contribution_per_90"] = latest_def["defcon_actions_per_90"]
+    if "player_id" in latest_def.columns:
+        out = out.merge(latest_def, on="player_id", how="left", suffixes=("", "_raw"))
+        out = _coalesce_suffix(
+            out,
+            [
+                "defensive_contribution",
+                "defensive_contribution_per_90",
+                "tackles",
+                "clearances_blocks_interceptions",
+                "recoveries",
+            ],
+            "_raw",
+        )
     for i, gw in enumerate(next_gws):
         out[f"GW{gw}_proj_points"] = preds[:, i]
 
@@ -441,19 +473,10 @@ def main() -> None:
             mid_dm_mask = pd.Series(False, index=frame.index)
 
         def_gk_only = ["expected_goals_conceded_per_90"]
-        def_gk_mid_dm_only = [
-            "defensive_contribution_per_90",
-            "tackles",
-            "clearances_blocks_interceptions",
-            "recoveries",
-        ]
 
         for c in def_gk_only:
             if c in frame.columns:
                 frame.loc[~is_def_gk, c] = np.nan
-        for c in def_gk_mid_dm_only:
-            if c in frame.columns:
-                frame.loc[~(is_def_gk | mid_dm_mask), c] = np.nan
         return frame
 
     out = _mask_role_fields(out)
@@ -499,6 +522,7 @@ def main() -> None:
         "clean_sheets",
         "goals_conceded",
         "starts",
+        "defensive_contribution",
         "defensive_contribution_per_90",
         "tackles",
         "clearances_blocks_interceptions",
