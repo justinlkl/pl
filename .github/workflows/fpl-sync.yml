@@ -1,115 +1,111 @@
 name: FPL Auto-Sync & Model Run
 
 on:
-  name: FPL Auto-Sync & Model Run
+  schedule:
+    # FPL-Core-Insights refreshes ~05:00 and ~17:00 UTC.
+    # Run a few minutes after to reduce the chance of syncing mid-update.
+    - cron: '10 5 * * *'
+    - cron: '10 17 * * *'
+  workflow_dispatch:
 
-  on:
-    schedule:
-      # FPL-Core-Insights refreshes ~05:00 and ~17:00 UTC.
-      # Run a few minutes after to reduce the chance of syncing mid-update.
-      - cron: '10 5 * * *'
-      - cron: '10 17 * * *'
-    workflow_dispatch:
+permissions:
+  contents: write
 
-  permissions:
-    contents: write
+concurrency:
+  group: fpl-auto-sync
+  cancel-in-progress: true
 
-  concurrency:
-    group: fpl-auto-sync
-    cancel-in-progress: true
+env:
+  DATA_REPO_URL: https://github.com/olbauday/FPL-Core-Insights.git
+  DATA_BRANCH: main
+  PYTHON_VERSION: '3.10'
 
-  env:
-    DATA_REPO_URL: https://github.com/olbauday/FPL-Core-Insights.git
-    DATA_BRANCH: main
-    PYTHON_VERSION: '3.10'
+jobs:
+  sync-and-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
-  jobs:
-    sync-and-run:
-      runs-on: ubuntu-latest
-      timeout-minutes: 30
+    steps:
+      - name: Checkout model repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      steps:
-        - name: Checkout model repository
-          uses: actions/checkout@v4
-          with:
-            fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
 
-        - name: Set up Python
-          uses: actions/setup-python@v5
-          with:
-            python-version: ${{ env.PYTHON_VERSION }}
-            cache: pip
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-        - name: Install Python dependencies
-          run: |
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
+      - name: Sync FPL-Core-Insights dataset
+        run: |
+          set -e
+          echo "📥 Syncing FPL-Core-Insights..."
 
-        - name: Sync FPL-Core-Insights dataset
-          run: |
-            set -e
-            echo "📥 Syncing FPL-Core-Insights..."
+          if [ -d "FPL-Core-Insights/.git" ]; then
+            echo "Found existing FPL-Core-Insights checkout; hard-resetting to origin/${DATA_BRANCH}"
+            git -C FPL-Core-Insights fetch --depth=1 origin ${DATA_BRANCH}
+            git -C FPL-Core-Insights reset --hard FETCH_HEAD
+          else
+            rm -rf FPL-Core-Insights
+            git clone --depth 1 --branch ${DATA_BRANCH} ${DATA_REPO_URL} FPL-Core-Insights
+          fi
 
-            if [ -d "FPL-Core-Insights/.git" ]; then
-              echo "Found existing FPL-Core-Insights checkout; hard-resetting to origin/${DATA_BRANCH}"
-              git -C FPL-Core-Insights fetch --depth=1 origin ${DATA_BRANCH}
-              git -C FPL-Core-Insights reset --hard FETCH_HEAD
-            else
-              rm -rf FPL-Core-Insights
-              git clone --depth 1 --branch ${DATA_BRANCH} ${DATA_REPO_URL} FPL-Core-Insights
-            fi
+          echo "✓ Data synced"
+          echo "Latest data commit: $(git -C FPL-Core-Insights rev-parse --short HEAD)"
+          echo "CSV count: $(find FPL-Core-Insights/data -name '*.csv' | wc -l)"
 
-            echo "✓ Data synced"
-            echo "Latest data commit: $(git -C FPL-Core-Insights rev-parse --short HEAD)"
-            echo "CSV count: $(find FPL-Core-Insights/data -name '*.csv' | wc -l)"
+      - name: Run projection model
+        run: |
+          set -e
+          echo "🤖 Generating projections (ensemble_predict)..."
+          python -m src.fpl_projection.ensemble_predict \
+            --ensemble-dir artifacts/ensemble \
+            --mid-split \
+            --backend sklearn
 
-        - name: Run projection model
-          run: |
-            set -e
-            echo "🤖 Generating projections (ensemble_predict)..."
-            python -m src.fpl_projection.ensemble_predict \
-              --ensemble-dir artifacts/ensemble \
-              --mid-split \
-              --backend sklearn
+          echo "✓ Wrote outputs/projections.csv + outputs/projections_internal.csv"
 
-            echo "✓ Wrote outputs/projections.csv + outputs/projections_internal.csv"
+      - name: Regenerate static site JSON
+        run: |
+          set -e
+          echo "🧱 Regenerating site data..."
+          python scripts/generate_site.py
 
-        - name: Regenerate static site JSON
-          run: |
-            set -e
-            echo "🧱 Regenerating site data..."
-            python scripts/generate_site.py
+      - name: Commit and push results
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-        - name: Commit and push results
-          run: |
-            set -e
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Commit only the generated artifacts that power your hosted site.
+          git add \
+            outputs/projections.csv \
+            outputs/projections_internal.csv \
+            site/data/projections.json \
+            site/projections.json
 
-            # Commit only the generated artifacts that power your hosted site.
-            git add \
-              outputs/projections.csv \
-              outputs/projections_internal.csv \
-              site/data/projections.json \
-              site/projections.json
+          if git diff --cached --quiet; then
+            echo "✓ No changes to commit"
+            exit 0
+          fi
 
-            if git diff --cached --quiet; then
-              echo "✓ No changes to commit"
-              exit 0
-            fi
+          git commit -m "🔄 Auto update projections ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+          git push
 
-            git commit -m "🔄 Auto update projections ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
-            git push
-
-        - name: Upload run artifacts
-          if: always()
-          uses: actions/upload-artifact@v4
-          with:
-            name: fpl-projections-${{ github.run_id }}
-            path: |
-              outputs/projections.csv
-              outputs/projections_internal.csv
-              site/data/projections.json
-              site/projections.json
-            retention-days: 14
-          |----------|-------|
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpl-projections-${{ github.run_id }}
+          path: |
+            outputs/projections.csv
+            outputs/projections_internal.csv
+            site/data/projections.json
+            site/projections.json
+          retention-days: 14

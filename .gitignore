@@ -10,8 +10,14 @@ dist/
 build/
 
 # Model artifacts / outputs
-artifacts/
-outputs/
+# Keep heavy artifacts ignored, but allow small automation markers.
+artifacts/*
+!artifacts/last_postgw_event.json
+
+# Keep outputs ignored, but allow committed projection CSVs.
+outputs/*
+!outputs/projections.csv
+!outputs/projections_internal.csv
 
 # Training byproducts
 catboost_info/
