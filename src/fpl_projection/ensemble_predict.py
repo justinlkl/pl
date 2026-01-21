@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+import json
+import tempfile
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +21,57 @@ from .role_modeling import (
     position_to_role,
     scale_projection_matrix,
 )
+
+
+def _strip_key_recursive(obj: object, key: str) -> object:
+    if isinstance(obj, dict):
+        return {k: _strip_key_recursive(v, key) for k, v in obj.items() if k != key}
+    if isinstance(obj, list):
+        return [_strip_key_recursive(v, key) for v in obj]
+    return obj
+
+
+def _load_keras_model_compat(model_path: Path) -> tf.keras.Model:
+    """Load a Keras .keras model with best-effort forward/backward compatibility.
+
+    Some Keras versions serialize layer configs containing keys like
+    `quantization_config` that older Keras versions don't accept.
+    If we hit that specific issue, we rewrite the model config to drop those keys
+    (they are typically `None` in our use case) and retry.
+    """
+    try:
+        return tf.keras.models.load_model(str(model_path), compile=False)
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "quantization_config" not in msg:
+            raise
+
+        if not model_path.exists() or model_path.suffix.lower() != ".keras":
+            raise
+
+        with tempfile.TemporaryDirectory(prefix="keras_compat_") as td:
+            tmp_dir = Path(td)
+            extracted = tmp_dir / "extracted"
+            extracted.mkdir(parents=True, exist_ok=True)
+
+            with zipfile.ZipFile(model_path, "r") as zf:
+                zf.extractall(extracted)
+
+            config_path = extracted / "config.json"
+            if not config_path.exists():
+                raise
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config = _strip_key_recursive(config, "quantization_config")
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+
+            patched_path = tmp_dir / "patched.keras"
+            with zipfile.ZipFile(patched_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for p in extracted.rglob("*"):
+                    if p.is_file():
+                        zf.write(p, p.relative_to(extracted).as_posix())
+
+            return tf.keras.models.load_model(str(patched_path), compile=False)
 
 
 def _build_opponent_lookup(
@@ -235,7 +289,7 @@ def main() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Load LSTM + preprocessing
-    lstm = tf.keras.models.load_model(str(ensemble_dir / "lstm_model.keras"), compile=False)
+    lstm = _load_keras_model_compat(ensemble_dir / "lstm_model.keras")
     prep = PreprocessArtifacts.load(str(ensemble_dir / "preprocess.joblib"))
 
     model_horizon = int(lstm.output_shape[-1])
