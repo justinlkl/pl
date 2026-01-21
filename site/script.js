@@ -44,6 +44,55 @@ function badgeUrl(teamShort) {
   return `assets/badges/${encodeURIComponent(t)}.svg`;
 }
 
+function getPlayerPhotoUrl(playerId) {
+  const pid = toInt(playerId, 0);
+  if (!pid) return 'https://via.placeholder.com/80x80?text=N/A';
+  return `https://resources.premierleague.com/premierleague/photos/players/110x140/p${pid}.png`;
+}
+
+function getTeamBadgeCdnUrl(teamCode) {
+  const code = toInt(teamCode, 0);
+  if (!code) return '';
+  return `https://resources.premierleague.com/premierleague/badges/t${code}.png`;
+}
+
+function getShirtUrl(teamCode) {
+  const code = toInt(teamCode, 0);
+  if (!code) return '';
+  return `https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_${code}-110.png`;
+}
+
+function renderPlayerCell(p) {
+  const pid = toInt(p.player_id, 0);
+  const photo = getPlayerPhotoUrl(pid);
+
+  const teamShort = safeText(p.team).trim();
+  const badgeFallback = badgeUrl(teamShort);
+  const badgeCdn = getTeamBadgeCdnUrl(p.team_code);
+  const badge = badgeCdn || badgeFallback;
+
+  return React.createElement('div', { className: 'player-cell' },
+    React.createElement('img', {
+      className: 'player-photo',
+      src: photo,
+      alt: safeText(p.web_name),
+      onError: (e) => { e.currentTarget.src = 'https://via.placeholder.com/80x80?text=N/A'; },
+    }),
+    React.createElement('div', { className: 'player-meta' },
+      React.createElement('div', { className: 'player-name' }, safeText(p.web_name)),
+      React.createElement('div', { className: 'player-sub' },
+        React.createElement('img', {
+          className: 'team-badge',
+          src: badge,
+          alt: teamShort,
+          onError: (e) => { e.currentTarget.src = badgeFallback; },
+        }),
+        React.createElement('span', null, teamShort)
+      )
+    )
+  );
+}
+
 function fdrPill(fdr, label) {
   const f = clamp(toInt(fdr, 3), 1, 5);
   const text = label ? `${f} ${label}` : `${f}`;
@@ -131,6 +180,7 @@ function normalizeProjections(rows) {
 
     out.team = safeText(out.team ?? out.short_name ?? out.club).trim();
     out.team_id = toInt(out.team_id ?? out.teamid, 0);
+    out.team_code = toInt(out.team_code ?? out.teamCode ?? out.code, 0);
 
     const priceRaw = out.price ?? out.now_cost ?? out.value;
     let price = toNum(priceRaw, 0);
@@ -407,7 +457,7 @@ function ProjectionsTab({ projections, onSelectPlayer }) {
   function buildKeyStatsColumns() {
     // Clean requested columns, plus xPts to keep the projections table useful.
     return [
-      { key: 'web_name', label: 'web_name', render: (p) => safeText(p.web_name) },
+      { key: 'web_name', label: 'web_name', render: (p) => renderPlayerCell(p) },
       { key: 'position', label: 'position', render: (p) => safeText(p.position) },
       { key: 'team', label: 'team', render: (p) => safeText(p.team) },
       { key: 'proj_points', label: 'proj_points', render: (p) => fmtMaybe(toNum(p.proj_points, 0), 2) },
@@ -584,7 +634,7 @@ function ProjectionsTab({ projections, onSelectPlayer }) {
               React.createElement('tbody', null,
                 filtered.slice(0, 200).map((p) =>
                   React.createElement('tr', { key: p.player_id || `${p.web_name}-${p.team}`, className: 'player-card', onClick: () => onSelectPlayer(p) },
-                    React.createElement('td', null, safeText(p.web_name)),
+                    React.createElement('td', null, renderPlayerCell(p)),
                     React.createElement('td', null, safeText(p.team)),
                     React.createElement('td', null, safeText(p.position)),
                     React.createElement('td', null, `£${toNum(p.price, 0).toFixed(1)}`),

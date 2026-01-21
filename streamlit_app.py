@@ -24,6 +24,21 @@ import requests
 import streamlit as st
 
 
+def get_player_photo_url(player_id: int) -> str:
+    """Official Premier League CDN player photo (best-effort)."""
+    return f"https://resources.premierleague.com/premierleague/photos/players/110x140/p{int(player_id)}.png"
+
+
+def get_team_badge_url(team_code: int) -> str:
+    """Official Premier League CDN team badge (best-effort)."""
+    return f"https://resources.premierleague.com/premierleague/badges/t{int(team_code)}.png"
+
+
+def get_shirt_url(team_code: int) -> str:
+    """FPL kit image (best-effort)."""
+    return f"https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_{int(team_code)}-110.png"
+
+
 STAT_GLOSSARY: dict[str, str] = {
     "£M": "Price in £m",
     "App": "Appearances / starts proxy (starts)",
@@ -362,6 +377,7 @@ def price_options_from_proj(
         hi = float(df["price"].max())
         lo = max(default_min, (int(lo * 2) / 2.0))
         hi = max(lo + step, (int(hi * 2 + 1) / 2.0))
+        hi = min(hi, float(default_max))
     opts = []
     v = lo
     while v <= hi + 1e-9:
@@ -809,10 +825,10 @@ def build_clean_playerstats_view(
     is_mid_dm = (pos == "MID") & (defense_proxy >= (attack_proxy * 1.25).clip(lower=0.6))
     show_def_cols = pos.isin(["DEF", "GK"]) | is_mid_dm
 
+    selected_by_percent = pd.to_numeric(_series("selected_by_percent"), errors="coerce")
+
     view = pd.DataFrame(
         {
-            "first_name": _series("first_name", ""),
-            "second_name": _series("second_name", ""),
             "web_name": _series("web_name", ""),
             "position": pos,
             "team": _series("team", ""),
@@ -822,7 +838,7 @@ def build_clean_playerstats_view(
             "news": _series("news", ""),
 
             "now_cost": _series("now_cost"),
-            "selected_by_percent": _series("selected_by_percent"),
+            "selected_by_percent": selected_by_percent.map(lambda x: f"{x:.1f}%" if pd.notna(x) else pd.NA),
             "value_form": _series("value_form"),
             "value_season": _series("value_season"),
 
@@ -1290,12 +1306,13 @@ def _render_pitch_html(starters_df: pd.DataFrame, bench_df: pd.DataFrame) -> str
         + "</div>"
     )
 
-    formation_label = f"{formation or 'Invalid formation'}"
-    formation_html = (
-        "<div style='text-align:center;color:#e8f5e9;font-weight:800;margin-bottom:6px'>"
-        + formation_label
-        + "</div>"
-    )
+    formation_html = ""
+    if formation:
+        formation_html = (
+            "<div style='text-align:center;color:#e8f5e9;font-weight:800;margin-bottom:6px'>"
+            + formation
+            + "</div>"
+        )
 
     return (
         "<div style='width:100%;border-radius:14px;overflow:hidden;border:1px solid #e6e6e6'>"
@@ -1342,11 +1359,9 @@ def _render_interactive_cards(
     starters_df = team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy()
     bench_df = team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy()
 
-    ok, msg, formation = _validate_starting_xi(team_df, starters_ids)
+    ok, _, formation = _validate_starting_xi(team_df, starters_ids)
     if ok and formation:
         st.caption(f"Formation: {formation}")
-    else:
-        st.warning(msg or "Invalid formation")
 
     def _attempt_swap(id_a: int, role_a: str, id_b: int, role_b: str):
         nonlocal starters_ids, bench_ids
@@ -1402,21 +1417,52 @@ def _render_interactive_cards(
                         _attempt_swap(int(sel), str(sel_role), pid, "bench")
 
         with b:
-            badge = r.get("badge")
-            badge_html = ""
+            team_code = r.get("team_code")
+            team_code_num = None
             try:
-                if badge and Path(str(badge)).exists():
-                    badge_html = f"<img src='{badge}' style='width:22px;height:22px;vertical-align:-5px;margin-right:8px'/>"
+                if team_code is not None and str(team_code) != "":
+                    team_code_num = int(float(team_code))
             except Exception:
-                badge_html = ""
+                team_code_num = None
 
-            border = "2px solid #16a34a" if picked else "1px solid #eee"
+            photo_url = get_player_photo_url(pid) if pid else "https://via.placeholder.com/80x80?text=N%2FA"
+            badge_url = get_team_badge_url(team_code_num) if team_code_num else ""
+
+            badge_fallback = r.get("badge")
+            badge_html = ""
+            if badge_url:
+                fallback_src = str(badge_fallback or "")
+                badge_html = (
+                    f"<img src='{badge_url}' style='width:22px;height:22px;vertical-align:-5px;margin-right:8px' "
+                    f"onerror=\"this.src='{fallback_src}'\"/>"
+                )
+            else:
+                try:
+                    if badge_fallback and Path(str(badge_fallback)).exists():
+                        badge_html = f"<img src='{badge_fallback}' style='width:22px;height:22px;vertical-align:-5px;margin-right:8px'/>"
+                except Exception:
+                    badge_html = ""
+
+            border = "2px solid #16a34a" if picked else "1px solid rgba(0,0,0,0.08)"
             st.markdown(
-                "<div style='background:#fff;border-radius:12px;padding:10px 12px;margin:6px 0;"
+                "<div style='background:#fff;border-radius:14px;padding:12px 12px;margin:10px 0;"
+                "box-shadow:0 6px 14px rgba(0,0,0,0.10);"
                 f"border:{border}'>"
-                f"<div style='font-weight:800;font-size:14px'>{badge_html}{r.get('web_name')}</div>"
-                f"<div style='color:#666;font-size:12px'>{r.get('team')} · {r.get('position')}</div>"
-                f"<div style='color:#111;font-size:12px;margin-top:4px'>£{float(r.get('price',0) or 0):.1f}m · Pred {float(r.get('proj_points',0) or 0):.1f}</div>"
+                "<div style='display:flex;align-items:center;gap:12px'>"
+                f"<img src='{photo_url}' style='width:54px;height:54px;border-radius:50%;object-fit:cover;"
+                "border:3px solid #00ff87;background:#f3f4f6' "
+                "onerror=\"this.src='https://via.placeholder.com/80x80?text=N%2FA'\"/>"
+                "<div style='flex:1'>"
+                f"<div style='font-weight:900;font-size:14px;color:#111'>{r.get('web_name')}</div>"
+                f"<div style='color:#6b7280;font-size:12px'>{badge_html}{r.get('team')} · {r.get('position')}</div>"
+                "<div style='margin-top:6px;display:flex;justify-content:space-between;align-items:center'>"
+                f"<span style='font-weight:800;color:#111'>£{float(r.get('price',0) or 0):.1f}m</span>"
+                f"<span style='font-weight:800;color:#065f46;background:rgba(0,255,135,0.20);padding:2px 8px;border-radius:999px;font-size:12px'>"
+                f"Pred {float(r.get('proj_points',0) or 0):.1f}"
+                "</span>"
+                "</div>"
+                "</div>"
+                "</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
@@ -1487,8 +1533,46 @@ def load_projections() -> pd.DataFrame:
 
 
 def main():
-    st.set_page_config(page_title="FPL Team Builder", layout="wide")
-    st.title("⚽ FPL Team Builder & Projections")
+    st.set_page_config(
+        page_title="FPL Analytics Hub",
+        page_icon="⚽",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    st.markdown(
+        """
+<style>
+    :root {
+        --fpl-purple: #37003c;
+        --fpl-green: #00ff87;
+        --fpl-pink: #ff2882;
+    }
+    .block-container { padding-top: 1.2rem; }
+    .header-container {
+        background: linear-gradient(135deg, var(--fpl-purple) 0%, var(--fpl-green) 100%);
+        padding: 18px 16px;
+        border-radius: 14px;
+        margin: 0 0 18px 0;
+        text-align: center;
+        color: white;
+    }
+    .header-container h1 { margin: 0; font-size: 2.0rem; font-weight: 800; }
+    .header-container p { margin: 6px 0 0 0; opacity: 0.9; }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+<div class="header-container">
+    <h1>⚽ FPL Analytics Hub</h1>
+    <p>Professional Fantasy Premier League Planning & Predictions</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     # Load data
     projections = load_projections()
@@ -1613,13 +1697,6 @@ def main():
                 price_min = st.selectbox("Price min", options=price_opts, index=0)
                 price_max = st.selectbox("Price max", options=price_opts, index=len(price_opts) - 1)
 
-            has_minutes_prob = bool(projections.get("_has_minutes_prob", False).any() if "_has_minutes_prob" in projections.columns else False)
-            if has_minutes_prob:
-                min_minutes_prob = st.slider("Min minutes%", min_value=0, max_value=100, value=70, step=5)
-            else:
-                st.caption("Minutes filter disabled (simple model has no minutes probability).")
-                min_minutes_prob = 0
-
             filt = projections.copy()
             if pos != "All" and "position" in filt.columns:
                 filt = filt[filt["position"] == pos]
@@ -1627,8 +1704,6 @@ def main():
                 filt = filt[filt["team"] == club]
             if "price" in filt.columns:
                 filt = filt[(filt["price"] >= float(price_min)) & (filt["price"] <= float(price_max))]
-            if has_minutes_prob and "minutes_prob" in filt.columns:
-                filt = filt[pd.to_numeric(filt["minutes_prob"], errors="coerce").fillna(0.0) >= (float(min_minutes_prob) / 100.0)]
 
             view = build_key_stats_view(filt)
             st.dataframe(view.head(300), width="stretch")
@@ -1637,10 +1712,10 @@ def main():
     with tabs[2]:
         st.subheader("Fixture Difficulty Ticker")
         if fixtures.empty:
-            st.info("No fixtures data available (data/fixtures.json)")
+            st.warning("No fixtures data available (data/fixtures.json)")
         else:
             if "event" not in fixtures.columns:
-                st.info("Fixtures file isn't in event format (missing 'event').")
+                st.warning("Fixtures file isn't in event format (missing 'event').")
             else:
                 gw_min = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().min())
                 gw_max = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().max())
@@ -1649,7 +1724,7 @@ def main():
                 gw_max = min(gw_max, 38)
 
                 if gw_min > gw_max:
-                    st.info("No fixtures available for GW 21–38.")
+                    st.warning("No fixtures available for GW 21–38.")
                     st.stop()
 
                 if gw_min == gw_max:
@@ -1750,135 +1825,140 @@ def main():
         st.subheader("Transfer Planner")
         st.caption("Squad rules enforced: £100.0m budget · Max 3 per club · 2 GK / 5 DEF / 5 MID / 3 FWD (15 total)")
 
-        if "team_ids" not in st.session_state:
-            st.session_state.team_ids = []
-        if "tp_starters_ids" not in st.session_state:
-            st.session_state.tp_starters_ids = []
-        if "tp_bench_ids" not in st.session_state:
-            st.session_state.tp_bench_ids = []
+        try:
 
-        if st.session_state.team_ids and not projections.empty:
-            team_df = projections[projections["player_id"].astype(int).isin([int(x) for x in st.session_state.team_ids])].copy()
-        else:
-            team_df = projections.head(0).copy() if not projections.empty else pd.DataFrame()
+            if "team_ids" not in st.session_state:
+                st.session_state.team_ids = []
+            if "tp_starters_ids" not in st.session_state:
+                st.session_state.tp_starters_ids = []
+            if "tp_bench_ids" not in st.session_state:
+                st.session_state.tp_bench_ids = []
 
-        if not team_df.empty and len(team_df) >= 11 and (not st.session_state.tp_starters_ids):
-            starters = _best_xi_ids(team_df)
-            st.session_state.tp_starters_ids = starters
-            st.session_state.tp_bench_ids = [
-                int(x)
-                for x in team_df["player_id"].astype(int).tolist()
-                if int(x) not in set(int(s) for s in starters)
-            ]
+            if st.session_state.team_ids and not projections.empty:
+                team_df = projections[projections["player_id"].astype(int).isin([int(x) for x in st.session_state.team_ids])].copy()
+            else:
+                team_df = projections.head(0).copy() if not projections.empty else pd.DataFrame()
 
-        def _remove_from_planner(pid: int):
-            st.session_state.team_ids = [x for x in st.session_state.team_ids if int(x) != int(pid)]
-            st.session_state.tp_starters_ids = [x for x in st.session_state.tp_starters_ids if int(x) != int(pid)]
-            st.session_state.tp_bench_ids = [x for x in st.session_state.tp_bench_ids if int(x) != int(pid)]
-
-        left, right = st.columns([1.3, 1.0], gap="large")
-        with left:
-            starters_ids = [int(x) for x in st.session_state.get("tp_starters_ids", [])]
-            bench_ids = [int(x) for x in st.session_state.get("tp_bench_ids", [])]
-
-            if not team_df.empty and len(team_df) >= 11 and len(starters_ids) != 11:
-                starters_ids = _best_xi_ids(team_df)
-                bench_ids = [
+            if not team_df.empty and len(team_df) >= 11 and (not st.session_state.tp_starters_ids):
+                starters = _best_xi_ids(team_df)
+                st.session_state.tp_starters_ids = starters
+                st.session_state.tp_bench_ids = [
                     int(x)
                     for x in team_df["player_id"].astype(int).tolist()
-                    if int(x) not in set(int(s) for s in starters_ids)
+                    if int(x) not in set(int(s) for s in starters)
                 ]
 
-            starters_ids, bench_ids = _render_interactive_cards(
-                title="Transfer Planner lineup",
-                team_df=team_df,
-                starters_ids=starters_ids,
-                bench_ids=bench_ids,
-                state_prefix="tp",
-                allow_remove=True,
-                on_remove_player=_remove_from_planner,
-            )
-            st.session_state.tp_starters_ids = starters_ids
-            st.session_state.tp_bench_ids = bench_ids
+            def _remove_from_planner(pid: int):
+                st.session_state.team_ids = [x for x in st.session_state.team_ids if int(x) != int(pid)]
+                st.session_state.tp_starters_ids = [x for x in st.session_state.tp_starters_ids if int(x) != int(pid)]
+                st.session_state.tp_bench_ids = [x for x in st.session_state.tp_bench_ids if int(x) != int(pid)]
 
-            starters_df = (
-                team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy() if not team_df.empty else pd.DataFrame()
-            )
-            bench_df = (
-                team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy() if not team_df.empty else pd.DataFrame()
-            )
-            st.markdown(_render_pitch_html(starters_df, bench_df), unsafe_allow_html=True)
+            left, right = st.columns([1.3, 1.0], gap="large")
+            with left:
+                starters_ids = [int(x) for x in st.session_state.get("tp_starters_ids", [])]
+                bench_ids = [int(x) for x in st.session_state.get("tp_bench_ids", [])]
 
-            summary = _team_summary(team_df)
-            st.metric("Team Cost", f"£{summary['cost']:.1f}m")
-            st.write(
-                f"Positions: GK {summary['counts'].get('GK',0)}/2 · DEF {summary['counts'].get('DEF',0)}/5 · "
-                f"MID {summary['counts'].get('MID',0)}/5 · FWD {summary['counts'].get('FWD',0)}/3"
-            )
+                if not team_df.empty and len(team_df) >= 11 and len(starters_ids) != 11:
+                    starters_ids = _best_xi_ids(team_df)
+                    bench_ids = [
+                        int(x)
+                        for x in team_df["player_id"].astype(int).tolist()
+                        if int(x) not in set(int(s) for s in starters_ids)
+                    ]
 
-        with right:
-            st.markdown("**Player filters**")
-            q = st.text_input("Search", value="")
-            fpos = st.radio("Position", options=["ALL", "GK", "DEF", "MID", "FWD"], horizontal=True)
-            price_opts = price_options_from_proj(projections)
-            pmin, pmax = st.select_slider("Price", options=price_opts, value=(price_opts[0], price_opts[-1]))
-            teams = (
-                sorted(projections["team"].dropna().unique().tolist())
-                if (not projections.empty and "team" in projections.columns)
-                else []
-            )
-            fteams = st.multiselect("Filter by club(s)", options=teams, default=[])
+                starters_ids, bench_ids = _render_interactive_cards(
+                    title="Transfer Planner lineup",
+                    team_df=team_df,
+                    starters_ids=starters_ids,
+                    bench_ids=bench_ids,
+                    state_prefix="tp",
+                    allow_remove=True,
+                    on_remove_player=_remove_from_planner,
+                )
+                st.session_state.tp_starters_ids = starters_ids
+                st.session_state.tp_bench_ids = bench_ids
 
-            cand = projections.copy()
-            if q:
-                cand = cand[
-                    cand["web_name"].astype(str).str.contains(q, case=False, na=False)
-                    | cand.get("team", "").astype(str).str.contains(q, case=False, na=False)
-                ]
-            if fpos != "ALL":
-                cand = cand[cand["position"] == fpos]
-            cand = cand[(cand["price"] >= float(pmin)) & (cand["price"] <= float(pmax))]
-            if fteams:
-                cand = cand[cand["team"].isin(fteams)]
-            cand = cand.sort_values("proj_points", ascending=False)
+                starters_df = (
+                    team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy() if not team_df.empty else pd.DataFrame()
+                )
+                bench_df = (
+                    team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy() if not team_df.empty else pd.DataFrame()
+                )
+                st.markdown(_render_pitch_html(starters_df, bench_df), unsafe_allow_html=True)
 
-            st.markdown("**Top players**")
-            for _, r in cand.head(25).iterrows():
-                ok, reason = _can_add_player(team_df, r)
-                pid = int(r.get("player_id"))
-                name = r.get("web_name")
-                team = r.get("team")
-                pos = r.get("position")
-                price = float(r.get("price", 0) or 0)
-                proj = float(r.get("proj_points", 0) or 0)
+                summary = _team_summary(team_df)
+                st.metric("Team Cost", f"£{summary['cost']:.1f}m")
+                st.write(
+                    f"Positions: GK {summary['counts'].get('GK',0)}/2 · DEF {summary['counts'].get('DEF',0)}/5 · "
+                    f"MID {summary['counts'].get('MID',0)}/5 · FWD {summary['counts'].get('FWD',0)}/3"
+                )
 
-                c1, c2 = st.columns([4, 1])
-                with c1:
-                    badge = r.get("badge")
-                    badge_html = ""
-                    try:
-                        if badge and Path(str(badge)).exists():
-                            badge_html = f"<img src='{badge}' style='width:26px;height:26px;vertical-align:-6px;margin-right:8px'/>"
-                    except Exception:
+            with right:
+                st.markdown("**Player filters**")
+                q = st.text_input("Search", value="")
+                fpos = st.radio("Position", options=["ALL", "GK", "DEF", "MID", "FWD"], horizontal=True)
+                price_opts = price_options_from_proj(projections)
+                pmin, pmax = st.select_slider("Price", options=price_opts, value=(price_opts[0], price_opts[-1]))
+                teams = (
+                    sorted(projections["team"].dropna().unique().tolist())
+                    if (not projections.empty and "team" in projections.columns)
+                    else []
+                )
+                fteams = st.multiselect("Filter by club(s)", options=teams, default=[])
+
+                cand = projections.copy()
+                if q:
+                    cand = cand[
+                        cand["web_name"].astype(str).str.contains(q, case=False, na=False)
+                        | cand.get("team", "").astype(str).str.contains(q, case=False, na=False)
+                    ]
+                if fpos != "ALL":
+                    cand = cand[cand["position"] == fpos]
+                cand = cand[(cand["price"] >= float(pmin)) & (cand["price"] <= float(pmax))]
+                if fteams:
+                    cand = cand[cand["team"].isin(fteams)]
+                cand = cand.sort_values("proj_points", ascending=False)
+
+                st.markdown("**Top players**")
+                for _, r in cand.head(25).iterrows():
+                    ok, reason = _can_add_player(team_df, r)
+                    pid = int(r.get("player_id"))
+                    name = r.get("web_name")
+                    team = r.get("team")
+                    pos = r.get("position")
+                    price = float(r.get("price", 0) or 0)
+                    proj = float(r.get("proj_points", 0) or 0)
+
+                    c1, c2 = st.columns([4, 1])
+                    with c1:
+                        badge = r.get("badge")
                         badge_html = ""
+                        try:
+                            if badge and Path(str(badge)).exists():
+                                badge_html = f"<img src='{badge}' style='width:26px;height:26px;vertical-align:-6px;margin-right:8px'/>"
+                        except Exception:
+                            badge_html = ""
 
-                    st.markdown(
-                        "<div style='background:#fff;border:1px solid #eee;border-radius:12px;padding:10px 12px;margin-bottom:10px'>"
-                        f"<div style='display:flex;justify-content:space-between;align-items:center'>"
-                        f"<div style='font-weight:800;font-size:15px'>{badge_html}{name} <span style='color:#999;font-weight:600;font-size:12px'>({team} · {pos})</span></div>"
-                        f"<div style='color:#111;font-weight:800'>Pred {proj:.1f}</div>"
-                        "</div>"
-                        f"<div style='margin-top:6px;color:#444;font-size:12px'>£{price:.1f}m</div>"
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
+                        st.markdown(
+                            "<div style='background:#fff;border:1px solid #eee;border-radius:12px;padding:10px 12px;margin-bottom:10px'>"
+                            f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                            f"<div style='font-weight:800;font-size:15px'>{badge_html}{name} <span style='color:#999;font-weight:600;font-size:12px'>({team} · {pos})</span></div>"
+                            f"<div style='color:#111;font-weight:800'>Pred {proj:.1f}</div>"
+                            "</div>"
+                            f"<div style='margin-top:6px;color:#444;font-size:12px'>£{price:.1f}m</div>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
 
-                with c2:
-                    if st.button("Add", key=f"add_{pid}", disabled=not ok):
-                        st.session_state.team_ids = [*st.session_state.team_ids, pid]
-                        st.rerun()
-                    if not ok and reason:
-                        st.caption(reason)
+                    with c2:
+                        if st.button("Add", key=f"add_{pid}", disabled=not ok):
+                            st.session_state.team_ids = [*st.session_state.team_ids, pid]
+                            st.rerun()
+                        if not ok and reason:
+                            st.caption(reason)
+
+        except Exception:
+            st.info("🔜 Advanced transfer planning tool coming soon!")
 
 
 if __name__ == "__main__":
