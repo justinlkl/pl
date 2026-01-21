@@ -12,6 +12,7 @@ from .data_loading import load_premier_league_gameweek_stats
 from .modeling import build_lstm_model
 from .preprocessing import PreprocessArtifacts, fit_preprocessor_on_timesteps, select_and_coerce_numeric, transform_sequences
 from .sequences import build_sequences, split_by_end_gw
+from .evaluation import evaluate_fpl_model
 from .role_modeling import build_feature_weight_vector, infer_role_from_window, position_to_role
 from .role_modeling import role_loss_weight
 
@@ -163,11 +164,28 @@ def main() -> None:
         help="Train and save only the LSTM + preprocessing artifacts (skip PyCaret stacking).",
     )
 
+    parser.add_argument(
+        "--backend",
+        choices=["sklearn", "pycaret"],
+        default="sklearn",
+        help=(
+            "Stacking backend. Default is sklearn (works on Python 3.13). "
+            "pycaret requires Python < 3.12 and extra dependencies."
+        ),
+    )
+
     parser.add_argument("--artifacts-dir", default=None)
     parser.add_argument("--out-dir", default=None)
+
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="Write LSTM and ensemble evaluation files under <out_dir>/diagnostics/.",
+    )
     args = parser.parse_args()
 
-    if not args.lstm_only:
+    use_pycaret = (not bool(args.lstm_only)) and (str(args.backend).lower() == "pycaret")
+    if use_pycaret:
         _require_pycaret()
         from pycaret.regression import (  # type: ignore
             create_model,
@@ -177,6 +195,11 @@ def main() -> None:
             setup,
             stack_models,
         )
+    else:
+        from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor, StackingRegressor
+        from sklearn.linear_model import Ridge
+        from sklearn.model_selection import KFold
+        import joblib
 
     _set_seed(args.seed)
 
@@ -353,6 +376,26 @@ def main() -> None:
         verbose=1,
     )
 
+    # Evaluate LSTM on the held-out test window.
+    X_test_pred = X_test
+    y_test_true = test_ds.y
+    lstm_pred_test = lstm.predict(X_test_pred, verbose=0)
+    metrics_lstm, calib_lstm, per_role_lstm = evaluate_fpl_model(
+        y_true=y_test_true,
+        y_pred=lstm_pred_test,
+        player_id=test_ds.player_id,
+        roles=test_roles,
+        top_n=50,
+        n_calibration_bins=10,
+    )
+    print(
+        "LSTM test diagnostics: "
+        f"rank_corr={metrics_lstm['rank_correlation']:.3f} "
+        f"top_50_recall={metrics_lstm.get('top_50_recall', float('nan')):.3f} "
+        f"calib_err_rel={metrics_lstm['calibration_error_rel']:.3f} "
+        f"mae={metrics_lstm['mae']:.3f}"
+    )
+
     print("Saving LSTM artifacts...")
     (out_dir / "lstm_model.keras").parent.mkdir(parents=True, exist_ok=True)
     lstm.save(str(out_dir / "lstm_model.keras"))
@@ -361,6 +404,13 @@ def main() -> None:
     if args.lstm_only:
         print(f"\nSaved LSTM-only artifacts to: {out_dir}")
         print("Skipping PyCaret stacking (Phase B) because --lstm-only was set.")
+
+        if args.diagnostics:
+            diag_dir = out_dir / "diagnostics"
+            diag_dir.mkdir(parents=True, exist_ok=True)
+            (diag_dir / "metrics_LSTM.json").write_text(pd.Series(metrics_lstm).to_json(indent=2))
+            calib_lstm.to_csv(diag_dir / "calibration_LSTM.csv", index=False)
+            per_role_lstm.to_csv(diag_dir / "per_role_LSTM.csv", index=False)
         return
 
     # Build LSTM predictions for ALL sequence samples (train+val+test) to feed Phase B.
@@ -373,6 +423,7 @@ def main() -> None:
         {
             "player_id": dataset.player_id,
             "end_gw": dataset.end_gw,
+            "role": roles_for_seq,
         }
     )
     for k in range(args.horizon):
@@ -407,15 +458,28 @@ def main() -> None:
     # Drop any rows where the join failed.
     tab = tab.dropna(subset=[*feature_columns]).copy()
 
-    # Phase B: Train per-horizon stacked model using TimeSeriesSplit.
-    print("Training PyCaret models (Phase B) with fold_strategy='timeseries'...")
-    ignore_cols = ["player_id", "web_name", "end_gw", target_col]
+    # Split stacking table by time: train+val only, evaluate on held-out test.
+    train_tab = tab[tab["end_gw"] <= val_max_end_gw].copy()
+    test_tab = tab[tab["end_gw"] > val_max_end_gw].copy()
+    if train_tab.empty or test_tab.empty:
+        raise ValueError(
+            f"Ensemble split failed: train_tab={len(train_tab)} rows, test_tab={len(test_tab)} rows. "
+            f"val_max_end_gw={val_max_end_gw}, max_end_gw={max_end_gw}."
+        )
+
+    # Phase B: Train per-horizon stacked model on train+val only, evaluate on held-out test.
+    print(f"Training stacking models (Phase B) backend={args.backend}...")
+
+    # Collect test predictions per horizon so we can evaluate the ensemble end-to-end.
+    ensemble_pred_test = np.zeros((len(test_tab), args.horizon), dtype=float)
+    ensemble_true_test = np.zeros((len(test_tab), args.horizon), dtype=float)
 
     for h in range(1, args.horizon + 1):
         target_col = f"target_h{h}"
         print(f"\n=== Horizon {h}: training target={target_col} ===")
 
-        data_h = tab.drop(columns=[c for c in tab.columns if c.startswith("target_h") and c != target_col]).copy()
+        data_h_all = train_tab.drop(columns=[c for c in train_tab.columns if c.startswith("target_h") and c != target_col]).copy()
+        data_h_test = test_tab.drop(columns=[c for c in test_tab.columns if c.startswith("target_h") and c != target_col]).copy()
 
         # Keep only one LSTM prediction column for this horizon, plus all engineered tabular features.
         keep_cols = [
@@ -426,39 +490,108 @@ def main() -> None:
             f"lstm_pred_h{h}",
             target_col,
         ]
-        data_h = data_h[keep_cols].copy()
+        data_h = data_h_all[keep_cols].copy()
+        data_h_test = data_h_test[keep_cols].copy()
 
         # Boost LSTM influence in the stacker by scaling the LSTM prediction feature.
         data_h[f"lstm_pred_h{h}"] = pd.to_numeric(data_h[f"lstm_pred_h{h}"], errors="coerce") * float(args.lstm_pred_scale)
-
-        # Setup: no shuffle, time-series CV based on row order (sorted by end_gw).
-        exp = setup(
-            data=data_h,
-            target=target_col,
-            session_id=args.seed,
-            fold_strategy="timeseries",
-            fold=args.folds,
-            data_split_shuffle=False,
-            fold_shuffle=False,
-            ignore_features=ignore_cols,
-            verbose=False,
+        data_h_test[f"lstm_pred_h{h}"] = pd.to_numeric(data_h_test[f"lstm_pred_h{h}"], errors="coerce") * float(
+            args.lstm_pred_scale
         )
 
-        # Train base models with early stopping where supported.
-        lgbm = create_model("lightgbm", early_stopping_rounds=args.early_stopping_rounds)
-        cat = create_model("catboost", early_stopping_rounds=args.early_stopping_rounds)
+        if use_pycaret:
+            ignore_cols = ["player_id", "web_name", "end_gw", target_col]
 
-        # Stack: meta learner (ridge is a strong default).
-        ridge = create_model("ridge")
-        stacked = stack_models(estimator_list=[cat, lgbm], meta_model=ridge)
-        final = finalize_model(stacked)
+            setup(
+                data=data_h,
+                target=target_col,
+                session_id=args.seed,
+                fold_strategy="timeseries",
+                fold=args.folds,
+                data_split_shuffle=False,
+                fold_shuffle=False,
+                ignore_features=ignore_cols,
+                verbose=False,
+            )
 
-        save_model(final, str(out_dir / f"stack_h{h}"))
+            lgbm = create_model("lightgbm", early_stopping_rounds=args.early_stopping_rounds)
+            cat = create_model("catboost", early_stopping_rounds=args.early_stopping_rounds)
 
-        # Write quick in-sample preds for inspection (sorted by time).
-        preds_h = predict_model(final, data=data_h)
-        preds_h = preds_h.sort_values(["end_gw", "player_id"]).reset_index(drop=True)
-        preds_h.to_csv(out_dir / f"train_preds_h{h}.csv", index=False)
+            ridge = create_model("ridge")
+            stacked = stack_models(estimator_list=[cat, lgbm], meta_model=ridge)
+            final = finalize_model(stacked)
+
+            save_model(final, str(out_dir / f"stack_h{h}"))
+
+            preds_h = predict_model(final, data=data_h)
+            preds_h = preds_h.sort_values(["end_gw", "player_id"]).reset_index(drop=True)
+            preds_h.to_csv(out_dir / f"train_preds_h{h}.csv", index=False)
+
+            preds_test_h = predict_model(final, data=data_h_test)
+            if "prediction_label" not in preds_test_h.columns:
+                raise ValueError("PyCaret prediction output missing 'prediction_label' column")
+            ensemble_pred_test[:, h - 1] = (
+                pd.to_numeric(preds_test_h["prediction_label"], errors="coerce").to_numpy(dtype=float)
+            )
+            ensemble_true_test[:, h - 1] = pd.to_numeric(data_h_test[target_col], errors="coerce").to_numpy(dtype=float)
+
+        else:
+            # sklearn backend: simple stacking on numeric features.
+            feature_cols = [c for c in keep_cols if c not in {"player_id", "web_name", "end_gw", target_col}]
+            Xtr = data_h[feature_cols].to_numpy(dtype=float)
+            ytr = pd.to_numeric(data_h[target_col], errors="coerce").to_numpy(dtype=float)
+            Xte = data_h_test[feature_cols].to_numpy(dtype=float)
+            yte = pd.to_numeric(data_h_test[target_col], errors="coerce").to_numpy(dtype=float)
+
+            # Note: StackingRegressor requires a partitioning CV (each sample appears in exactly
+            # one test fold). TimeSeriesSplit leaves early samples out of all test folds, which
+            # causes a runtime error. KFold(with shuffle=False) gives a full partition.
+            cv = KFold(n_splits=int(args.folds), shuffle=False)
+            base = [
+                ("hgb", HistGradientBoostingRegressor(random_state=args.seed)),
+                ("etr", ExtraTreesRegressor(n_estimators=300, random_state=args.seed, n_jobs=-1)),
+            ]
+            model = StackingRegressor(
+                estimators=base,
+                final_estimator=Ridge(alpha=1.0, random_state=args.seed),
+                cv=cv,
+                passthrough=False,
+                n_jobs=-1,
+            )
+            model.fit(Xtr, ytr)
+            joblib.dump(model, out_dir / f"stack_h{h}.joblib")
+
+            pred_te = model.predict(Xte)
+            ensemble_pred_test[:, h - 1] = np.asarray(pred_te, dtype=float)
+            ensemble_true_test[:, h - 1] = np.asarray(yte, dtype=float)
+
+    # Evaluate the ensemble on the held-out test window at player-level.
+    metrics_ens, calib_ens, per_role_ens = evaluate_fpl_model(
+        y_true=ensemble_true_test,
+        y_pred=ensemble_pred_test,
+        player_id=test_tab["player_id"].to_numpy(dtype=int),
+        roles=test_tab["role"].to_numpy(dtype=object),
+        top_n=50,
+        n_calibration_bins=10,
+    )
+    print(
+        "Ensemble test diagnostics: "
+        f"rank_corr={metrics_ens['rank_correlation']:.3f} "
+        f"top_50_recall={metrics_ens.get('top_50_recall', float('nan')):.3f} "
+        f"calib_err_rel={metrics_ens['calibration_error_rel']:.3f} "
+        f"mae={metrics_ens['mae']:.3f}"
+    )
+
+    if args.diagnostics:
+        diag_dir = out_dir / "diagnostics"
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        (diag_dir / "metrics_LSTM.json").write_text(pd.Series(metrics_lstm).to_json(indent=2))
+        calib_lstm.to_csv(diag_dir / "calibration_LSTM.csv", index=False)
+        per_role_lstm.to_csv(diag_dir / "per_role_LSTM.csv", index=False)
+
+        (diag_dir / "metrics_ENSEMBLE.json").write_text(pd.Series(metrics_ens).to_json(indent=2))
+        calib_ens.to_csv(diag_dir / "calibration_ENSEMBLE.csv", index=False)
+        per_role_ens.to_csv(diag_dir / "per_role_ENSEMBLE.csv", index=False)
 
     print(f"\nSaved stacked models to: {out_dir}")
 
