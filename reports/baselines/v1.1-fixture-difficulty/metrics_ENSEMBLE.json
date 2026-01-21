@@ -1,0 +1,11 @@
+{
+  "rank_correlation":0.8737808264,
+  "top_50_recall":0.54,
+  "calibration_error":0.6407307289,
+  "calibration_error_rel":0.1003475579,
+  "mae":3.0499454008,
+  "mae_DEF":3.3197368241,
+  "mae_FWD":3.0852472785,
+  "mae_GK":1.2690525096,
+  "mae_MID_AM":3.084468642
+}

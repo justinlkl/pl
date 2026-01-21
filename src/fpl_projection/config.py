@@ -25,6 +25,10 @@ CORE_PREDICTORS: list[str] = [
     # FPL dataset already provides value metrics; treat value_season as the primary "value".
     "value_season",
 
+    # Simple fixture difficulty (engineered during load from fixtures.csv + teams.csv)
+    "fixture_difficulty",
+    "fixture_is_home",
+
     # Availability
     "minutes",
     "starts",  # maps to "games_started"

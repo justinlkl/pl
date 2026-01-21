@@ -9,6 +9,109 @@ import pandas as pd
 from .feature_engineering import engineer_all_features
 
 
+def _build_fixture_difficulty_table(*, base: Path, teams_path: Path) -> pd.DataFrame:
+    """Build a per-(gw, team_code) fixture difficulty table.
+
+    We derive opponent + home/away from each GW's fixtures.csv and map opponent
+    strength from teams.csv. This is best-effort and returns an empty dataframe
+    if fixture inputs are missing.
+    """
+
+    fixture_files = sorted(
+        base.glob("GW*/fixtures.csv"), key=lambda p: _extract_gw_from_path(p) or 0
+    )
+    if not fixture_files or not teams_path.exists():
+        return pd.DataFrame()
+
+    teams = pd.read_csv(teams_path)
+    if "code" not in teams.columns:
+        return pd.DataFrame()
+    teams = teams.copy()
+    teams["code"] = pd.to_numeric(teams["code"], errors="coerce")
+    teams = teams.dropna(subset=["code"]).copy()
+    teams["code"] = teams["code"].astype(int)
+
+    opp_strength = None
+    if "strength" in teams.columns:
+        opp_strength = teams[["code", "strength"]].rename(columns={"strength": "opp_strength"})
+
+    opp_elo = None
+    if "elo" in teams.columns:
+        opp_elo = teams[["code", "elo"]].rename(columns={"elo": "opp_elo"})
+
+    frames: list[pd.DataFrame] = []
+    for file_path in fixture_files:
+        fx = pd.read_csv(file_path)
+        if fx.empty:
+            continue
+
+        # Prefer explicit gameweek column, otherwise infer from folder.
+        if "gameweek" in fx.columns:
+            fx["gw"] = pd.to_numeric(fx["gameweek"], errors="coerce")
+        elif "gw" in fx.columns:
+            fx["gw"] = pd.to_numeric(fx["gw"], errors="coerce")
+        else:
+            gw = _extract_gw_from_path(file_path)
+            fx["gw"] = gw
+
+        if "home_team" not in fx.columns or "away_team" not in fx.columns:
+            continue
+
+        keep = fx[["gw", "home_team", "away_team"]].copy()
+        keep["gw"] = pd.to_numeric(keep["gw"], errors="coerce")
+        keep["home_team"] = pd.to_numeric(keep["home_team"], errors="coerce")
+        keep["away_team"] = pd.to_numeric(keep["away_team"], errors="coerce")
+        keep = keep.dropna(subset=["gw", "home_team", "away_team"]).copy()
+        if keep.empty:
+            continue
+        keep["gw"] = keep["gw"].astype(int)
+        keep["home_team"] = keep["home_team"].astype(int)
+        keep["away_team"] = keep["away_team"].astype(int)
+
+        home = keep.rename(columns={"home_team": "team_code", "away_team": "opp_team_code"})
+        home["fixture_is_home"] = 1
+
+        away = keep.rename(columns={"away_team": "team_code", "home_team": "opp_team_code"})
+        away["fixture_is_home"] = 0
+
+        frames.extend([home, away])
+
+    if not frames:
+        return pd.DataFrame()
+
+    sched = pd.concat(frames, ignore_index=True)
+
+    # Map opponent strength signals.
+    if opp_strength is not None:
+        sched = sched.merge(opp_strength, left_on="opp_team_code", right_on="code", how="left")
+        sched = sched.drop(columns=["code"])
+    else:
+        sched["opp_strength"] = pd.NA
+
+    if opp_elo is not None:
+        sched = sched.merge(opp_elo, left_on="opp_team_code", right_on="code", how="left")
+        sched = sched.drop(columns=["code"])
+    else:
+        sched["opp_elo"] = pd.NA
+
+    # Simple difficulty score: stronger opponent + small away penalty.
+    sched["fixture_difficulty"] = pd.to_numeric(sched["opp_strength"], errors="coerce").astype(float)
+    sched.loc[sched["fixture_is_home"] == 0, "fixture_difficulty"] = (
+        sched.loc[sched["fixture_is_home"] == 0, "fixture_difficulty"] + 0.25
+    )
+
+    # If a team has multiple fixtures in a GW (double GW), average the difficulty.
+    agg = sched.groupby(["gw", "team_code"], as_index=False).agg(
+        {
+            "fixture_is_home": "mean",
+            "opp_strength": "mean",
+            "opp_elo": "mean",
+            "fixture_difficulty": "mean",
+        }
+    )
+    return agg
+
+
 @dataclass(frozen=True)
 class DataPaths:
     repo_root: Path
@@ -166,6 +269,27 @@ def load_premier_league_gameweek_stats(
     # Prefer web_name for display.
     if "web_name" not in all_df.columns:
         all_df["web_name"] = ""
+
+    # Attach simple fixture difficulty features from GW-level fixtures.csv.
+    # Best-effort: if fixtures/teams aren't available, we still create the columns
+    # so downstream preprocessing can depend on a stable schema.
+    fixture_cols = ["fixture_is_home", "opp_strength", "opp_elo", "fixture_difficulty"]
+    try:
+        if "team_code" in all_df.columns:
+            teams_path = paths.insights_data_root / season / "teams.csv"
+            fixture_table = _build_fixture_difficulty_table(base=base, teams_path=teams_path)
+            if not fixture_table.empty:
+                all_df = all_df.merge(
+                    fixture_table,
+                    on=["gw", "team_code"],
+                    how="left",
+                )
+    except Exception as exc:
+        print(f"Warning: failed to merge fixture difficulty features: {exc}")
+
+    for c in fixture_cols:
+        if c not in all_df.columns:
+            all_df[c] = pd.NA
     
     # Apply feature engineering if requested
     if apply_feature_engineering:

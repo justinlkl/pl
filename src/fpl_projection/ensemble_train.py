@@ -114,6 +114,18 @@ def main() -> None:
     parser.add_argument("--test-gws", type=int, default=3)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=8,
+        help="Early stopping patience (epochs) for LSTM training.",
+    )
+    parser.add_argument(
+        "--lr-plateau-patience",
+        type=int,
+        default=4,
+        help="ReduceLROnPlateau patience (epochs) for LSTM training.",
+    )
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument(
@@ -362,8 +374,19 @@ def main() -> None:
     monitor = str(args.monitor)
     callbacks = [
         _PerRoleValMetrics(X_val, y_val, val_roles),
-        tf.keras.callbacks.EarlyStopping(monitor=monitor, mode="min", patience=8, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor=monitor, mode="min", factor=0.5, patience=4, min_lr=1e-6),
+        tf.keras.callbacks.EarlyStopping(
+            monitor=monitor,
+            mode="min",
+            patience=int(args.early_stopping_patience),
+            restore_best_weights=True,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor=monitor,
+            mode="min",
+            factor=0.5,
+            patience=int(args.lr_plateau_patience),
+            min_lr=1e-6,
+        ),
     ]
     lstm.fit(
         X_train,

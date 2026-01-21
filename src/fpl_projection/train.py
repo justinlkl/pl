@@ -164,6 +164,18 @@ def main() -> None:
     parser.add_argument("--test-gws", type=int, default=DEFAULT_TEST_GWS)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=8,
+        help="Early stopping patience (epochs).",
+    )
+    parser.add_argument(
+        "--lr-plateau-patience",
+        type=int,
+        default=4,
+        help="ReduceLROnPlateau patience (epochs).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--target",
@@ -320,8 +332,17 @@ def main() -> None:
         model = build_lstm_model(seq_length=args.seq_length, num_features=n_features, horizon=args.horizon)
 
         callbacks = [
-            tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True),
-            tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-6),
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=int(args.early_stopping_patience),
+                restore_best_weights=True,
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=0.5,
+                patience=int(args.lr_plateau_patience),
+                min_lr=1e-6,
+            ),
         ]
 
         print(f"Training {role} for up to {args.epochs} epochs...")
@@ -556,8 +577,19 @@ def main() -> None:
 
     callbacks = [
         val_metrics_cb,
-        tf.keras.callbacks.EarlyStopping(monitor=monitor, mode="min", patience=8, restore_best_weights=True),
-        tf.keras.callbacks.ReduceLROnPlateau(monitor=monitor, mode="min", factor=0.5, patience=4, min_lr=1e-6),
+        tf.keras.callbacks.EarlyStopping(
+            monitor=monitor,
+            mode="min",
+            patience=int(args.early_stopping_patience),
+            restore_best_weights=True,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor=monitor,
+            mode="min",
+            factor=0.5,
+            patience=int(args.lr_plateau_patience),
+            min_lr=1e-6,
+        ),
     ]
 
     print(f"Training for up to {args.epochs} epochs with batch_size={args.batch_size}...")
