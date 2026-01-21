@@ -64,7 +64,7 @@ jobs:
         run: |
           set -e
           echo "🤖 Generating projections (ensemble_predict)..."
-          python -m src.fpl_projection.ensemble_predict \
+          python -u -m src.fpl_projection.ensemble_predict \
             --ensemble-dir artifacts/ensemble \
             --mid-split \
             --backend sklearn

@@ -77,7 +77,7 @@ jobs:
         run: |
           set -e
           echo "🤖 Training ensemble (weekly post-GW refresh)..."
-          python -m src.fpl_projection.ensemble_train \
+          python -u -m src.fpl_projection.ensemble_train \
             --season "${SEASON}" \
             --target "${TARGET}" \
             --mid-split \
@@ -91,7 +91,7 @@ jobs:
         run: |
           set -e
           echo "📈 Predicting next GW: ${{ steps.gw.outputs.next_gw }}"
-          python -m src.fpl_projection.ensemble_predict \
+          python -u -m src.fpl_projection.ensemble_predict \
             --season "${SEASON}" \
             --mid-split \
             --backend sklearn \

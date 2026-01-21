@@ -4,6 +4,7 @@ import argparse
 import sys
 import json
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -288,19 +289,27 @@ def main() -> None:
     if output_path.parent != Path("."):
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    t0 = time.perf_counter()
+    print("[predict] Loading model artifacts...")
     # Load LSTM + preprocessing
     lstm = _load_keras_model_compat(ensemble_dir / "lstm_model.keras")
     prep = PreprocessArtifacts.load(str(ensemble_dir / "preprocess.joblib"))
+
+    print(f"[predict] Loaded artifacts in {time.perf_counter() - t0:.1f}s")
 
     model_horizon = int(lstm.output_shape[-1])
     if args.horizon != model_horizon:
         print(f"Warning: --horizon={args.horizon} but LSTM outputs horizon={model_horizon}. Using horizon={model_horizon}.")
         args.horizon = model_horizon
 
+    t1 = time.perf_counter()
+    print("[predict] Loading and engineering data...")
     raw = load_premier_league_gameweek_stats(repo_root=repo_root, season=args.season, apply_feature_engineering=True)
     feature_columns = _get_available_features(raw, DEFAULT_FEATURE_COLUMNS)
 
     df = select_and_coerce_numeric(raw, prep.feature_columns, TARGET_COLUMN)
+
+    print(f"[predict] Data loaded in {time.perf_counter() - t1:.1f}s (rows={len(df):,})")
 
     last_gw = int(df["gw"].max())
     if args.start_gw is not None:
@@ -324,6 +333,8 @@ def main() -> None:
         )
         pid_to_pos = {int(r["player_id"]): r.get("position") for _, r in meta_pos.iterrows()}
 
+    t2 = time.perf_counter()
+    print("[predict] Building per-player windows...")
     for player_id, g in df.sort_values(["player_id", "gw"]).groupby("player_id", sort=False):
         g = g.sort_values("gw")
         if len(g) < args.seq_length:
@@ -350,6 +361,8 @@ def main() -> None:
     if not X_list:
         raise ValueError("No players had enough history to build sequences.")
 
+    print(f"[predict] Built windows for {len(X_list):,} players in {time.perf_counter() - t2:.1f}s")
+
     X = np.stack(X_list, axis=0)
     X = transform_sequences(prep.pipeline, X)
 
@@ -359,7 +372,10 @@ def main() -> None:
     W = np.stack([role_to_w.get(r, np.ones(len(prep.feature_columns))) for r in roles], axis=0)
     X = X * W[:, None, :]
 
-    lstm_preds = lstm.predict(X, verbose=0)
+    t3 = time.perf_counter()
+    print("[predict] Running LSTM inference...")
+    lstm_preds = lstm.predict(X, verbose=0, batch_size=256)
+    print(f"[predict] LSTM inference done in {time.perf_counter() - t3:.1f}s")
 
     out = pd.DataFrame(rows)
 
@@ -379,21 +395,31 @@ def main() -> None:
         for i, gw in enumerate(next_gws, start=1):
             out[f"GW{gw}_proj_points"] = lstm_preds[:, i - 1]
     else:
-        # Build per-horizon stacked predictions.
-        for i, gw in enumerate(next_gws, start=1):
-            # Build a minimal tabular row: last-timestep engineered features + lstm_pred_hi
-            tab = pd.DataFrame(last_feature_rows, columns=prep.feature_columns)
-            tab[f"lstm_pred_h{i}"] = np.asarray(lstm_preds[:, i - 1], dtype=float) * float(args.lstm_pred_scale)
+        t4 = time.perf_counter()
+        print(f"[predict] Running stacked predictions (backend={backend})...")
 
-            if backend == "pycaret":
+        base_tab = np.asarray(last_feature_rows, dtype=float)
+
+        if backend == "sklearn":
+            stack_models = [joblib.load(ensemble_dir / f"stack_h{i}.joblib") for i in range(1, args.horizon + 1)]
+            for i, gw in enumerate(next_gws, start=1):
+                lstm_col = (np.asarray(lstm_preds[:, i - 1], dtype=float) * float(args.lstm_pred_scale)).reshape(-1, 1)
+                Xte = np.concatenate([base_tab, lstm_col], axis=1)
+                out[f"GW{gw}_proj_points"] = np.asarray(stack_models[i - 1].predict(Xte), dtype=float)
+                if i == 1 or i == len(next_gws) or (i % 2 == 0):
+                    print(f"[predict]  - stacked horizon {i}/{len(next_gws)} done")
+        else:
+            tab_df = pd.DataFrame(last_feature_rows, columns=prep.feature_columns)
+            for i, gw in enumerate(next_gws, start=1):
+                tab = tab_df.copy()
+                tab[f"lstm_pred_h{i}"] = np.asarray(lstm_preds[:, i - 1], dtype=float) * float(args.lstm_pred_scale)
                 stack = load_model(str(ensemble_dir / f"stack_h{i}"))
                 pred_df = predict_model(stack, data=tab)
                 out[f"GW{gw}_proj_points"] = pred_df["prediction_label"].to_numpy(dtype=float)
-            else:
-                model = joblib.load(ensemble_dir / f"stack_h{i}.joblib")
-                feature_cols = [*prep.feature_columns, f"lstm_pred_h{i}"]
-                Xte = tab[feature_cols].to_numpy(dtype=float)
-                out[f"GW{gw}_proj_points"] = np.asarray(model.predict(Xte), dtype=float)
+                if i == 1 or i == len(next_gws) or (i % 2 == 0):
+                    print(f"[predict]  - stacked horizon {i}/{len(next_gws)} done")
+
+        print(f"[predict] Stacked predictions done in {time.perf_counter() - t4:.1f}s")
 
     # Enrich output with teams + playerstats snapshot fields to match projections.csv.
     insights_root = repo_root / "FPL-Core-Insights" / "data" / args.season
