@@ -13,6 +13,8 @@ build/
 # Keep heavy artifacts ignored, but allow small automation markers.
 artifacts/*
 !artifacts/last_postgw_event.json
+!artifacts/ensemble/
+!artifacts/ensemble/**
 
 # Keep outputs ignored, but allow committed projection CSVs.
 outputs/*

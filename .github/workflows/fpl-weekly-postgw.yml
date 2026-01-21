@@ -83,8 +83,8 @@ jobs:
             --mid-split \
             --backend sklearn \
             --epochs 25 \
-            --artifacts-dir artifacts_ci \
-            --out-dir artifacts_ci/ensemble
+            --artifacts-dir artifacts \
+            --out-dir artifacts/ensemble
 
       - name: Predict next gameweek (drops current GW projections)
         if: steps.gw.outputs.should_run == 'true'
@@ -95,7 +95,7 @@ jobs:
             --season "${SEASON}" \
             --mid-split \
             --backend sklearn \
-            --ensemble-dir artifacts_ci/ensemble \
+            --ensemble-dir artifacts/ensemble \
             --start-gw ${{ steps.gw.outputs.next_gw }}
 
       - name: Regenerate static site JSON
@@ -118,6 +118,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add \
+            artifacts/ensemble \
             outputs/projections.csv \
             outputs/projections_internal.csv \
             site/data/projections.json \
