@@ -1720,11 +1720,8 @@ def main():
                 gw_min = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().min())
                 gw_max = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().max())
 
-                gw_min = max(gw_min, 21)
-                gw_max = min(gw_max, 38)
-
                 if gw_min > gw_max:
-                    st.warning("No fixtures available for GW 21–38.")
+                    st.warning(f"No fixtures available (GW {gw_min}–{gw_max}).")
                     st.stop()
 
                 if gw_min == gw_max:
