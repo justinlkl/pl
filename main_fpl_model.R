@@ -6,8 +6,12 @@ suppressMessages({
   library(lubridate)
 })
 
-# Configuration
-data_dir <- Sys.getenv("DATA_DIR", default = "../fpl_data/data")
+# Configuration - FIX: Use ifelse() instead of Sys.getenv() default parameter
+data_dir <- ifelse(
+  nzchar(Sys.getenv("DATA_DIR")), 
+  Sys.getenv("DATA_DIR"), 
+  "../fpl_data/data"
+)
 output_dir <- "results"
 
 # Create output directory
@@ -22,7 +26,7 @@ log_msg <- function(msg, level = "INFO") {
 
 # Main execution
 log_msg("═══════════════════════════════════════════════════════")
-log_msg("FPL MODEL EXECUTION STARTED")
+log_msg("FPL DATA LOADING STARTED")
 log_msg("═══════════════════════════════════════════════════════")
 
 # Load data
@@ -34,6 +38,8 @@ tryCatch({
   
   if (length(csv_files) == 0) {
     log_msg(sprintf("⚠️  No CSV files found in %s", data_dir), "WARNING")
+    log_msg("Available files in data_dir:", "INFO")
+    system(paste("ls -la", data_dir))
   } else {
     log_msg(sprintf("✓ Found %d CSV file(s)", length(csv_files)))
   }
@@ -45,7 +51,7 @@ tryCatch({
       log_msg(sprintf("✓ Loaded %s (%d rows)", basename(.x), nrow(df)))
       df
     }, error = function(e) {
-      log_msg(sprintf("✗ Error: %s", basename(.x)), "ERROR")
+      log_msg(sprintf("✗ Error loading %s: %s", basename(.x), e$message), "ERROR")
       NULL
     })
   })
@@ -53,28 +59,25 @@ tryCatch({
   # Filter nulls
   data_list <- data_list[!sapply(data_list, is.null)]
   
-  # YOUR MODEL CODE HERE
-  log_msg("Processing model logic...")
-  
   # Create summary
   summary_stats <- tibble(
     execution_time = format(Sys.time(), "%Y-%m-%d %H:%M:%S UTC", tz = "UTC"),
     hk_time = format(Sys.time(), "%Y-%m-%d %H:%M:%S", tz = "Asia/Hong_Kong"),
+    data_dir_used = data_dir,
     files_loaded = length(data_list),
+    total_rows = sum(sapply(data_list, nrow)),
     status = "success"
   )
   
   print(summary_stats)
   
   # Save results
-  output_file <- file.path(output_dir, sprintf("results_%s.csv", format(Sys.time(), "%Y%m%d_%H%M%S")))
+  output_file <- file.path(output_dir, sprintf("data_load_%s.csv", format(Sys.time(), "%Y%m%d_%H%M%S")))
   fwrite(summary_stats, output_file)
-  log_msg(sprintf("✓ Results saved: %s", output_file))
+  log_msg(sprintf("✓ Data loading summary saved: %s", output_file))
   
 }, error = function(e) {
   log_msg(sprintf("✗ Error: %s", e$message), "ERROR")
 })
 
-log_msg("═══════════════════════════════════════════════════════")
-log_msg("✓ FPL MODEL COMPLETED")
-log_msg("═══════════════════════════════════════════════════════")
+log_msg("═══════════════════════════════════════
