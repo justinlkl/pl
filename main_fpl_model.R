@@ -6,7 +6,7 @@ suppressMessages({
   library(lubridate)
 })
 
-# Configuration - FIX: Use ifelse() instead of Sys.getenv() default parameter
+# Configuration - FIX: Use ifelse() instead of Sys.getenv() default
 data_dir <- ifelse(
   nzchar(Sys.getenv("DATA_DIR")), 
   Sys.getenv("DATA_DIR"), 
@@ -38,8 +38,6 @@ tryCatch({
   
   if (length(csv_files) == 0) {
     log_msg(sprintf("⚠️  No CSV files found in %s", data_dir), "WARNING")
-    log_msg("Available files in data_dir:", "INFO")
-    system(paste("ls -la", data_dir))
   } else {
     log_msg(sprintf("✓ Found %d CSV file(s)", length(csv_files)))
   }
@@ -58,6 +56,8 @@ tryCatch({
   
   # Filter nulls
   data_list <- data_list[!sapply(data_list, is.null)]
+  
+  log_msg("✓ Data loading completed successfully")
   
   # Create summary
   summary_stats <- tibble(
@@ -78,6 +78,11 @@ tryCatch({
   
 }, error = function(e) {
   log_msg(sprintf("✗ Error: %s", e$message), "ERROR")
+  quit(status = 1)
 })
 
-log_msg("═══════════════════════════════════════
+log_msg("═══════════════════════════════════════════════════════")
+log_msg("✓ FPL DATA LOADING COMPLETED")
+log_msg("═══════════════════════════════════════════════════════")
+
+quit(status = 0)
