@@ -1721,7 +1721,7 @@ def main():
                 gw_max = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().max())
 
                 if gw_min > gw_max:
-                    st.warning(f"No fixtures available (GW {gw_min}–{gw_max}).")
+                    st.warning("Invalid or empty fixture data.")
                     st.stop()
 
                 if gw_min == gw_max:
