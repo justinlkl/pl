@@ -19,11 +19,14 @@ env:
   PYTHON_VERSION: '3.10'
   SEASON: '2025-2026'
   TARGET: 'xp_blend'
+  EPOCHS: '60'
+  EARLY_STOPPING_PATIENCE: '12'
+  LR_PLATEAU_PATIENCE: '6'
 
 jobs:
   post-gw-update:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -82,7 +85,9 @@ jobs:
             --target "${TARGET}" \
             --mid-split \
             --backend sklearn \
-            --epochs 25 \
+            --epochs ${EPOCHS} \
+            --early-stopping-patience ${EARLY_STOPPING_PATIENCE} \
+            --lr-plateau-patience ${LR_PLATEAU_PATIENCE} \
             --artifacts-dir artifacts \
             --out-dir artifacts/ensemble
 

@@ -566,6 +566,7 @@ def main() -> None:
             "clearances_blocks_interceptions",
             "recoveries",
             "defensive_contribution",
+            "defcon_points",
             "defcon_actions",
             "defcon_actions_per_90",
         ],
@@ -584,6 +585,7 @@ def main() -> None:
                 "tackles",
                 "clearances_blocks_interceptions",
                 "recoveries",
+                "defcon_points",
             ],
             "_raw",
         )
@@ -805,6 +807,7 @@ def main() -> None:
         "tackles",
         "clearances_blocks_interceptions",
         "recoveries",
+        "defcon_points",
     ]
     proj_cols = [c for c in out.columns if c.startswith("GW") and c.endswith("_proj_points")]
     opp_cols = [c for c in out.columns if c.startswith("GW") and c.endswith("_opp")]

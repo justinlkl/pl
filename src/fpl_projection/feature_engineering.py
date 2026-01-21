@@ -436,7 +436,7 @@ def calculate_role_weighted_features(df: pd.DataFrame) -> pd.DataFrame:
     # This is a guardrail against MIDs with high defensive actions dominating rankings.
     feat_weights: dict[str, dict[str, float]] = {
         # The capped points signal is still relevant for all outfield roles, but smaller for MID/FWD.
-        "defcon_points": {"def": 1.0, "mid": 0.12, "fwd": 0.08, "gk": 0.0},
+        "defcon_points": {"def": 1.0, "mid": 0.25, "fwd": 0.20, "gk": 0.0},
         # Volume above threshold is already capped in calculate_per_90_metrics; still keep tiny for MID/FWD.
         "defcon_actions_per_90": {"def": 0.7, "mid": 0.03, "fwd": 0.02, "gk": 0.0},
         "cbi_per_90": {"def": 1.0, "mid": 0.10, "fwd": 0.06, "gk": 0.0},
