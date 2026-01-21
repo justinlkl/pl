@@ -15,6 +15,7 @@ from .sequences import build_sequences, split_by_end_gw
 from .evaluation import evaluate_fpl_model
 from .role_modeling import build_feature_weight_vector, infer_role_from_window, position_to_role
 from .role_modeling import role_loss_weight
+from .role_modeling import fit_role_projection_multipliers, save_role_scaling
 
 
 def _xgi_cap_from_raw_sequences(
@@ -604,6 +605,25 @@ def main() -> None:
         f"calib_err_rel={metrics_ens['calibration_error_rel']:.3f} "
         f"mae={metrics_ens['mae']:.3f}"
     )
+
+    # ---- Per-role calibration optimization (best-effort) ----
+    try:
+        overrides, report = fit_role_projection_multipliers(
+            y_true=ensemble_true_test,
+            y_pred=ensemble_pred_test,
+            player_id=test_tab["player_id"].to_numpy(dtype=int),
+            roles=test_tab["role"].to_numpy(dtype=object),
+        )
+        if overrides:
+            save_role_scaling(
+                out_dir / "role_scaling.json",
+                overrides=overrides,
+                report=report,
+                meta={"fitted_on": "test_window"},
+            )
+            print(f"Saved role scaling overrides to {out_dir / 'role_scaling.json'}")
+    except Exception as exc:
+        print(f"Warning: failed to fit/save role scaling overrides: {exc}")
 
     if args.diagnostics:
         diag_dir = out_dir / "diagnostics"

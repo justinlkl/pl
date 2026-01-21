@@ -266,6 +266,60 @@ def calculate_market_log_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calculate_attacking_context_embeddings(df: pd.DataFrame) -> pd.DataFrame:
+    """Lightweight attacking-context embeddings.
+
+    The upstream dataset doesn't provide true xThreat/xCarry, so we generate stable
+    proxy features from ICT components that behave like compact embeddings.
+    """
+    df = df.copy()
+
+    thr = pd.to_numeric(df.get("threat", 0.0), errors="coerce").fillna(0.0)
+    cre = pd.to_numeric(df.get("creativity", 0.0), errors="coerce").fillna(0.0)
+    inf = pd.to_numeric(df.get("influence", 0.0), errors="coerce").fillna(0.0)
+
+    df["xthreat_embed"] = np.log1p(np.maximum(thr, 0.0)).astype(float)
+    # Carry/context proxy: tends to reward ball-progression/creation profiles.
+    df["xcarry_embed"] = (0.65 * np.log1p(np.maximum(cre, 0.0)) + 0.35 * np.log1p(np.maximum(inf, 0.0))).astype(float)
+    return df
+
+
+def calculate_minutes_shrinkage(df: pd.DataFrame, *, prior_strength: float = 3.0) -> pd.DataFrame:
+    """Empirical-Bayes style shrinkage for expected minutes.
+
+    Uses last-5 appearance-average minutes (based on rolling sums) and shrinks it
+    toward a position prior to avoid overreacting to small samples.
+    """
+    df = df.copy()
+
+    if "rolling_5_minutes" not in df.columns or "rolling_5_appearances" not in df.columns or "minutes" not in df.columns:
+        df["minutes_expected_next"] = pd.to_numeric(df.get("minutes", 0.0), errors="coerce").fillna(0.0)
+        return df
+
+    # Position prior: mean minutes when player appeared.
+    pos = df.get("position", pd.Series(["" for _ in range(len(df))])).astype(str)
+    mins = pd.to_numeric(df.get("minutes", 0.0), errors="coerce").fillna(0.0)
+    appeared = mins > 0
+    pos_prior = mins.where(appeared).groupby(pos, sort=False).transform("mean").fillna(0.0)
+
+    n = pd.to_numeric(df.get("rolling_5_appearances", 0.0), errors="coerce").fillna(0.0)
+    recent_sum = pd.to_numeric(df.get("rolling_5_minutes", 0.0), errors="coerce").fillna(0.0)
+    recent_avg = recent_sum / np.maximum(n, 1.0)
+
+    w = (n / (n + float(prior_strength))).clip(lower=0.0, upper=1.0)
+    minutes_est = (w * recent_avg + (1.0 - w) * pos_prior).clip(lower=0.0, upper=90.0)
+
+    # Adjust by availability probability if present.
+    cop = pd.to_numeric(df.get("chance_of_playing_next_round", np.nan), errors="coerce")
+    if cop.notna().any():
+        cop = cop.fillna(1.0).clip(lower=0.0, upper=1.0)
+        minutes_est = minutes_est * cop
+
+    df["minutes_expected_next"] = minutes_est.astype(float)
+    df["minutes_expected_frac"] = (minutes_est / 90.0).astype(float)
+    return df
+
+
 def calculate_expected_points_proxy(df: pd.DataFrame) -> pd.DataFrame:
     """Create a smoother expected-points proxy label per GW.
 
@@ -457,6 +511,11 @@ def calculate_rolling_features(
                 df.loc[player_mask, f"{prefix}_minutes"] = (
                     group["minutes"].fillna(0).rolling(window=window, min_periods=1).sum().values
                 )
+
+                # Appearances count (minutes > 0) for shrinkage.
+                df.loc[player_mask, f"{prefix}_appearances"] = (
+                    (group["minutes"].fillna(0) > 0).astype(int).rolling(window=window, min_periods=1).sum().values
+                )
             
             # Defensive rolling (only for window=5)
             if window == 5 and "clearances_blocks_interceptions" in df.columns:
@@ -535,6 +594,7 @@ def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = calculate_bps_bonus_proxy(df)
     df = calculate_availability_probabilities(df)
     df = calculate_market_log_features(df)
+    df = calculate_attacking_context_embeddings(df)
     df = calculate_availability_features(df)
     df = calculate_defensive_contribution_points(df)
     df = calculate_per_90_metrics(df)
@@ -542,6 +602,7 @@ def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = calculate_performance_vs_expectation(df)
     df = calculate_expected_points_proxy(df)
     df = calculate_rolling_features(df, windows=[3, 5])
+    df = calculate_minutes_shrinkage(df)
     df = calculate_role_weighted_features(df)
     df = calculate_cumulative_features(df)
     

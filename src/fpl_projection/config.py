@@ -31,6 +31,9 @@ CORE_PREDICTORS: list[str] = [
 
     # Availability
     "minutes",
+    # Bayesian shrinkage (engineered)
+    "minutes_expected_next",
+    "minutes_expected_frac",
     "starts",  # maps to "games_started"
     # Engineered in feature_engineering.py
     "minutes_per_start",
@@ -53,6 +56,10 @@ CORE_PREDICTORS: list[str] = [
     "creativity",
     "threat",
     "form",
+
+    # Attacking context embeddings (engineered proxies)
+    "xthreat_embed",
+    "xcarry_embed",
 
     # Engineered: lightweight expected bonus proxy from ICT components
     "bps_bonus_proxy",

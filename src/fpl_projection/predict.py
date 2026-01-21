@@ -15,6 +15,7 @@ from .role_modeling import (
     infer_mid_subrole_from_window,
     infer_role_from_window,
     list_roles,
+    load_role_scaling,
     position_to_role,
     scale_projection_matrix,
 )
@@ -335,7 +336,8 @@ def main() -> None:
         out["role"] = ""
 
     if not args.no_role_scaling:
-        preds = scale_projection_matrix(preds, out["role"].to_numpy(dtype=object))
+        overrides = load_role_scaling(artifacts_dir / "role_scaling.json")
+        preds = scale_projection_matrix(preds, out["role"].to_numpy(dtype=object), overrides=overrides)
 
     # Attach club short/full names from teams.csv (team_code -> short_name/name)
     if teams_path.exists() and "team_code" in out.columns:

@@ -19,6 +19,7 @@ from .role_modeling import (
     build_feature_weight_vector,
     infer_mid_subrole_from_window,
     infer_role_from_window,
+    load_role_scaling,
     position_to_role,
     scale_projection_matrix,
 )
@@ -136,6 +137,112 @@ def _build_opponent_lookup(
         out[int(gw)] = {k: ";".join(v) for k, v in by_team.items()}
 
     return out
+
+
+def _build_fixture_strength_multipliers(
+    *,
+    repo_root: Path,
+    season: str,
+    gws: list[int],
+) -> tuple[dict[int, dict[int, float]], dict[int, dict[int, float]]]:
+    """Return (att_mult, def_mult) per GW/team_code from teams strength columns.
+
+    Attacker multiplier uses opponent defence strength; defender/GK multiplier uses opponent attack strength.
+    Values are best-effort and averaged for double fixtures.
+    """
+
+    insights_root = repo_root / "FPL-Core-Insights" / "data" / season
+    teams_path = insights_root / "teams.csv"
+    if not teams_path.exists():
+        return {}, {}
+
+    try:
+        teams = pd.read_csv(teams_path)
+    except Exception:
+        return {}, {}
+
+    req = [
+        "code",
+        "strength_attack_home",
+        "strength_attack_away",
+        "strength_defence_home",
+        "strength_defence_away",
+    ]
+    if any(c not in teams.columns for c in req):
+        return {}, {}
+
+    teams = teams[req].copy()
+    for c in req:
+        teams[c] = pd.to_numeric(teams[c], errors="coerce")
+    teams = teams.dropna(subset=["code"]).copy()
+    teams["code"] = teams["code"].astype(int)
+
+    atk_home = {int(r["code"]): float(r["strength_attack_home"]) for _, r in teams.iterrows()}
+    atk_away = {int(r["code"]): float(r["strength_attack_away"]) for _, r in teams.iterrows()}
+    def_home = {int(r["code"]): float(r["strength_defence_home"]) for _, r in teams.iterrows()}
+    def_away = {int(r["code"]): float(r["strength_defence_away"]) for _, r in teams.iterrows()}
+
+    # League baseline scales
+    mean_opp_def = float(np.nanmean(list(def_home.values()) + list(def_away.values())))
+    mean_opp_atk = float(np.nanmean(list(atk_home.values()) + list(atk_away.values())))
+    scale = 150.0  # strength values are ~1000-1400; 150 gives gentle multipliers
+
+    att_mult: dict[int, dict[int, list[float]]] = {}
+    def_mult: dict[int, dict[int, list[float]]] = {}
+
+    pl_base = insights_root / "By Tournament" / "Premier League"
+    for gw in gws:
+        fx_path = pl_base / f"GW{int(gw)}" / "fixtures.csv"
+        if not fx_path.exists():
+            continue
+        try:
+            fx = pd.read_csv(fx_path)
+        except Exception:
+            continue
+        if fx.empty or ("home_team" not in fx.columns) or ("away_team" not in fx.columns):
+            continue
+
+        ht = pd.to_numeric(fx["home_team"], errors="coerce")
+        at = pd.to_numeric(fx["away_team"], errors="coerce")
+        valid = ht.notna() & at.notna()
+        if not bool(valid.any()):
+            continue
+
+        ht = ht[valid].astype(int)
+        at = at[valid].astype(int)
+
+        for h, a in zip(ht.tolist(), at.tolist(), strict=False):
+            # Home team faces opponent away defence/attack
+            opp_def_for_h = def_away.get(int(a), mean_opp_def)
+            opp_atk_for_h = atk_away.get(int(a), mean_opp_atk)
+
+            # Away team faces opponent home defence/attack
+            opp_def_for_a = def_home.get(int(h), mean_opp_def)
+            opp_atk_for_a = atk_home.get(int(h), mean_opp_atk)
+
+            # Higher strength_defence => tougher for attackers; higher strength_attack => tougher for defenders.
+            k_att = 0.10
+            k_def = 0.08
+            m_att_h = float(np.exp(k_att * (mean_opp_def - float(opp_def_for_h)) / scale))
+            m_att_a = float(np.exp(k_att * (mean_opp_def - float(opp_def_for_a)) / scale))
+            m_def_h = float(np.exp(k_def * (mean_opp_atk - float(opp_atk_for_h)) / scale))
+            m_def_a = float(np.exp(k_def * (mean_opp_atk - float(opp_atk_for_a)) / scale))
+
+            # Small home advantage
+            m_att_h *= 1.02
+            m_def_h *= 1.02
+            m_att_a *= 0.98
+            m_def_a *= 0.98
+
+            att_mult.setdefault(int(gw), {}).setdefault(int(h), []).append(m_att_h)
+            att_mult.setdefault(int(gw), {}).setdefault(int(a), []).append(m_att_a)
+            def_mult.setdefault(int(gw), {}).setdefault(int(h), []).append(m_def_h)
+            def_mult.setdefault(int(gw), {}).setdefault(int(a), []).append(m_def_a)
+
+    # Average in case of double fixtures
+    att_out: dict[int, dict[int, float]] = {gw: {t: float(np.mean(v)) for t, v in teams.items()} for gw, teams in att_mult.items()}
+    def_out: dict[int, dict[int, float]] = {gw: {t: float(np.mean(v)) for t, v in teams.items()} for gw, teams in def_mult.items()}
+    return att_out, def_out
 
 
 def _latest_per_player(df: pd.DataFrame, *, cols: list[str]) -> pd.DataFrame:
@@ -465,8 +572,38 @@ def main() -> None:
     if not args.no_role_scaling:
         gw_cols = [c for c in out.columns if c.startswith("GW") and c.endswith("_proj_points")]
         if gw_cols:
-            scaled = scale_projection_matrix(out[gw_cols].to_numpy(dtype=float), out["role"].to_numpy(dtype=object))
+            overrides = load_role_scaling(ensemble_dir / "role_scaling.json")
+            scaled = scale_projection_matrix(
+                out[gw_cols].to_numpy(dtype=float),
+                out["role"].to_numpy(dtype=object),
+                overrides=overrides,
+            )
             out.loc[:, gw_cols] = scaled
+
+    # ---- Fixture-adjusted projection multipliers (opponent strength proxy) ----
+    # Best-effort: uses teams.csv strength_attack_*/strength_defence_* and fixtures.csv schedule.
+    # This adjusts each GW projection based on opponent strength at the venue.
+    if "team_code" in out.columns:
+        att_mult, def_mult = _build_fixture_strength_multipliers(repo_root=repo_root, season=args.season, gws=next_gws)
+        if att_mult or def_mult:
+            role_arr = out.get("role", "").astype(str)
+            is_def_gk_role = role_arr.isin(["DEF", "GK"])
+            team_codes = pd.to_numeric(out["team_code"], errors="coerce").astype("Int64")
+
+            for gw in next_gws:
+                col = f"GW{gw}_proj_points"
+                if col not in out.columns:
+                    continue
+
+                m_att = team_codes.map(att_mult.get(int(gw), {})).fillna(1.0).to_numpy(dtype=float)
+                m_def = team_codes.map(def_mult.get(int(gw), {})).fillna(1.0).to_numpy(dtype=float)
+                # MID_DM less sensitive than attackers.
+                is_mid_dm_role = role_arr.eq("MID_DM").to_numpy()
+                m_att = np.where(is_mid_dm_role, 0.75 + 0.25 * m_att, m_att)
+
+                mult = np.where(is_def_gk_role.to_numpy(), m_def, m_att)
+                out[f"GW{gw}_fixture_mult"] = mult.astype(float)
+                out[col] = out[col].to_numpy(dtype=float) * mult.astype(float)
 
     # team_code -> club short_name
     if teams_path.exists() and "team_code" in out.columns:

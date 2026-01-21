@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -24,6 +26,16 @@ ROLE_PROJECTION_MULTIPLIER: dict[str, float] = {
     ROLE_MID_DM: 0.70,
     ROLE_DEF: 1.05,
     ROLE_GK: 1.00,
+}
+
+
+ROLE_PROJECTION_MULTIPLIER_BOUNDS: dict[str, tuple[float, float]] = {
+    ROLE_FWD: (0.7, 1.8),
+    ROLE_MID_AM: (0.6, 1.6),
+    ROLE_MID: (0.6, 1.6),
+    ROLE_MID_DM: (0.3, 1.2),
+    ROLE_DEF: (0.6, 1.5),
+    ROLE_GK: (0.6, 1.4),
 }
 
 
@@ -69,6 +81,146 @@ def scale_projection_matrix(
     roles_arr = np.asarray(roles, dtype=object)
     mult = np.asarray([role_projection_multiplier(r, overrides=overrides) for r in roles_arr], dtype=float)
     return preds * mult.reshape(-1, 1)
+
+
+def _to_totals(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        return x.reshape(-1)
+    return x.reshape(x.shape[0], -1).sum(axis=1)
+
+
+def fit_role_projection_multipliers(
+    *,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    player_id: np.ndarray,
+    roles: np.ndarray,
+    bounds: dict[str, tuple[float, float]] | None = None,
+    grid_step: float = 0.01,
+    min_count: int = 25,
+) -> tuple[dict[str, float], pd.DataFrame]:
+    """Fit per-role post-model scaling multipliers.
+
+    We fit a scalar multiplier per role that minimizes MAE on player-level totals.
+    This is a pragmatic calibration step to align positional distributions to
+    recent historical accuracy.
+
+    Returns:
+      overrides: {role: multiplier}
+      report: DataFrame with counts + mae before/after per role
+    """
+
+    b = bounds or ROLE_PROJECTION_MULTIPLIER_BOUNDS
+
+    true_total = _to_totals(np.asarray(y_true, dtype=float))
+    pred_total = _to_totals(np.asarray(y_pred, dtype=float))
+
+    df = pd.DataFrame(
+        {
+            "player_id": np.asarray(player_id).astype(int),
+            "role": np.asarray(roles, dtype=object).astype(str),
+            "true_total": true_total,
+            "pred_total": pred_total,
+        }
+    )
+
+    def _mode(series: pd.Series) -> str:
+        vc = series.value_counts(dropna=False)
+        return str(vc.index[0]) if not vc.empty else ""
+
+    by_player = (
+        df.groupby("player_id", as_index=False)
+        .agg(true_total=("true_total", "mean"), pred_total=("pred_total", "mean"), role=("role", _mode))
+        .reset_index(drop=True)
+    )
+
+    overrides: dict[str, float] = {}
+    rows: list[dict[str, object]] = []
+
+    for role, g in by_player.groupby("role"):
+        role = str(role)
+        if int(len(g)) < int(min_count):
+            continue
+
+        lo, hi = b.get(role, (0.5, 1.5))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            lo, hi = (0.5, 1.5)
+
+        yt = g["true_total"].to_numpy(dtype=float)
+        yp = g["pred_total"].to_numpy(dtype=float)
+        mask = np.isfinite(yt) & np.isfinite(yp)
+        yt = yt[mask]
+        yp = yp[mask]
+        if yt.size < int(min_count):
+            continue
+
+        base_mae = float(np.mean(np.abs(yp - yt)))
+        if float(np.mean(np.abs(yp))) < 1e-9:
+            continue
+
+        n = int(max(2, np.floor((hi - lo) / float(grid_step)) + 1))
+        grid = np.linspace(float(lo), float(hi), n, dtype=float)
+
+        best_s = 1.0
+        best_mae = float("inf")
+        for s in grid:
+            mae = float(np.mean(np.abs(s * yp - yt)))
+            if mae < best_mae:
+                best_mae = mae
+                best_s = float(s)
+
+        overrides[role] = float(best_s)
+        rows.append(
+            {
+                "role": role,
+                "count": int(yt.size),
+                "mae_before": float(base_mae),
+                "mae_after": float(best_mae),
+                "multiplier": float(best_s),
+            }
+        )
+
+    report = pd.DataFrame(rows)
+    if not report.empty:
+        report = report.sort_values(["role"]).reset_index(drop=True)
+    return overrides, report
+
+
+def save_role_scaling(
+    path: Path,
+    *,
+    overrides: dict[str, float],
+    report: pd.DataFrame | None = None,
+    meta: dict[str, object] | None = None,
+) -> None:
+    payload: dict[str, object] = {
+        "overrides": {k: float(v) for k, v in overrides.items()},
+    }
+    if report is not None and not report.empty:
+        payload["report"] = report.to_dict(orient="records")
+    if meta:
+        payload["meta"] = meta
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def load_role_scaling(path: Path) -> dict[str, float] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("overrides"), dict):
+        out: dict[str, float] = {}
+        for k, v in payload["overrides"].items():
+            try:
+                out[str(k)] = float(v)
+            except Exception:
+                continue
+        return out
+    return None
 
 
 def _norm_pos(v: Any) -> str:

@@ -26,6 +26,8 @@ from .role_modeling import (
     infer_role_from_window,
     list_roles,
     position_to_role,
+    fit_role_projection_multipliers,
+    save_role_scaling,
     role_loss_weight,
 )
 
@@ -611,6 +613,27 @@ def main() -> None:
         sw_test = None
     test_loss, test_mae = model.evaluate(X_test, y_test, sample_weight=sw_test, verbose=0)
     print(f"Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}")
+
+    # ---- Per-role calibration optimization (fit on validation window) ----
+    try:
+        val_pred = model.predict(X_val, verbose=0)
+        y_val_true = y_val[..., 0] if (y_val.ndim == 3 and y_val.shape[-1] >= 1) else y_val
+        overrides, report = fit_role_projection_multipliers(
+            y_true=y_val_true,
+            y_pred=val_pred,
+            player_id=val_ds.player_id,
+            roles=val_roles,
+        )
+        if overrides:
+            save_role_scaling(
+                artifacts_dir / "role_scaling.json",
+                overrides=overrides,
+                report=report,
+                meta={"fitted_on": "val_window"},
+            )
+            print(f"Saved role scaling overrides: {overrides}")
+    except Exception as exc:
+        print(f"Warning: failed to fit role scaling overrides: {exc}")
 
     # Ranking-centric diagnostics: compute from raw y and predictions.
     pred = model.predict(X_test, verbose=0)
