@@ -34,11 +34,23 @@ jobs:
           install.packages(c("tidyverse", "data.table", "lubridate", "jsonlite"))
         shell: Rscript {0}
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-ensemble.txt ]; then pip install -r requirements-ensemble.txt; fi
+
       - name: Clone FPL data repository
         run: |
           echo "📥 Cloning FPL-Core-Insights..."
           git clone --depth 1 ${{ env.DATA_REPO_URL }} ${{ env.DATA_DIR }}
           echo "✓ Data repository cloned"
+          echo "CSV files found: $(find ${{ env.DATA_DIR }} -name '*.csv' 2>/dev/null | wc -l)"
 
       - name: Show environment info
         run: |
@@ -47,26 +59,37 @@ jobs:
           echo "════════════════════════════════════════════════════════"
           echo "Time (UTC): $(date -u +'%Y-%m-%d %H:%M:%S')"
           echo "Time (HK): $(TZ=Asia/Hong_Kong date +'%Y-%m-%d %H:%M:%S')"
-          echo "CSV files: $(find ${{ env.DATA_DIR }} -name '*.csv' 2>/dev/null | wc -l)"
+          echo "Data directory: ${{ env.DATA_DIR }}"
           echo "════════════════════════════════════════════════════════"
 
-      - name: Run R model
+      - name: Run R data loading
         env:
-          DATA_DIR: ${{ env.DATA_DIR }}
-        run: Rscript main_fpl_model.R
-        shell: bash
+          DATA_DIR: ${{ env.DATA_DIR }}/data
+        run: |
+          echo "🚀 Running R data loading script..."
+          Rscript main_fpl_model.R
+          echo "✓ R script completed"
 
-      - name: Commit results
+      - name: Run projection model (generate_site.py)
+        run: |
+          echo "🤖 Running projection model..."
+          python scripts/generate_site.py
+          echo "✓ Projection model completed"
+        continue-on-error: true
+
+      - name: Commit and push results
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
           git add results/ outputs/ 2>/dev/null || true
+          
           if git diff --cached --quiet; then
             echo "✓ No changes to commit"
           else
             git commit -m "🔄 Auto FPL update: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
             git push origin main
-            echo "✓ Changes pushed"
+            echo "✓ Changes pushed to repository"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,15 +99,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fpl-output-${{ github.run_id }}
-          path: results/
+          name: fpl-model-output-${{ github.run_id }}
+          path: |
+            results/
+            outputs/
           retention-days: 30
 
       - name: Create job summary
         if: always()
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## ✅ FPL Model Execution Summary
+          ## ✅ FPL Auto-Sync & Model Execution Summary
           
           | Property | Value |
           |----------|-------|
@@ -92,12 +117,14 @@ jobs:
           | **Run ID** | ${{ github.run_id }} |
           | **Timestamp (UTC)** | $(date -u +'%Y-%m-%d %H:%M:%S') |
           | **Timestamp (HK)** | $(TZ=Asia/Hong_Kong date +'%Y-%m-%d %H:%M:%S') |
+          | **Data Source** | FPL-Core-Insights |
+          | **Model** | Projection model (generate_site.py) |
           
-          ### 📊 Schedule
-          - Morning: 5 AM UTC = 1 PM HK
-          - Evening: 5 PM UTC = 1 AM HK (next day)
+          ### 📊 Daily Schedule
+          - Morning: 5:00 AM UTC = 1:00 PM HK
+          - Evening: 5:00 PM UTC = 1:00 AM HK (next day)
           
-          ### 📂 Data Sources
-          - FPL: [FPL-Core-Insights](https://github.com/olbauday/FPL-Core-Insights)
-          - Model: [justinlkl/pl](https://github.com/justinlkl/pl)
+          ### 🔗 Links
+          - [View Repository](https://github.com/justinlkl/pl)
+          - [View FPL Data Source](https://github.com/olbauday/FPL-Core-Insights)
           EOF
