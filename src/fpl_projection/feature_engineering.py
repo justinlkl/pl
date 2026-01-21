@@ -37,16 +37,14 @@ def calculate_position_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_defensive_contribution_points(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute FPL 2025/26 Defensive Contributions *points* (0 or 2) with cap.
+    """Compute FPL 2025/26 Defensive Contributions points (threshold logic).
 
     Official rules (2025/26):
-    - DEF: 2 pts for 10+ CBIT
-    - MID/FWD: 2 pts for 12+ CBIRT
-    - Cap: 2 pts per match
+    - DEF: 2 pts per 10 tackles+clearances+blocks+interceptions
+    - MID/FWD: 2 pts per 12 tackles+clearances+blocks+interceptions
 
     The dataset often includes a `defensive_contribution` count already (from the
-    official API). We convert actions -> points to prevent the model from over-weighting
-    raw action volume beyond the scoring cap.
+    official API). We convert actions -> points using FPL's step function.
     """
     df = df.copy()
 
@@ -56,8 +54,8 @@ def calculate_defensive_contribution_points(df: pd.DataFrame) -> pd.DataFrame:
     else:
         tackles = pd.to_numeric(df.get("tackles", 0), errors="coerce").fillna(0.0)
         cbi = pd.to_numeric(df.get("clearances_blocks_interceptions", 0), errors="coerce").fillna(0.0)
-        recoveries = pd.to_numeric(df.get("recoveries", 0), errors="coerce").fillna(0.0)
-        actions = tackles + cbi + recoveries
+        # CBI is already clearances+blocks+interceptions in the source dataset.
+        actions = tackles + cbi
 
     # Position-aware threshold
     pos_norm = df.get("position", pd.Series(["" for _ in range(len(df))])).astype(str).str.strip().str.lower()
@@ -65,11 +63,11 @@ def calculate_defensive_contribution_points(df: pd.DataFrame) -> pd.DataFrame:
     is_def = pos_norm.isin(["defender", "def", "df"])
     is_mid_fwd = ~(is_gk | is_def)
 
-    # GK are not listed as eligible in the provided rules.
-    threshold = np.where(is_def.to_numpy(), 10.0, np.where(is_mid_fwd.to_numpy(), 12.0, np.inf))
+    threshold = np.where((is_def | is_gk).to_numpy(), 10.0, np.where(is_mid_fwd.to_numpy(), 12.0, np.nan))
 
     df["defcon_actions"] = actions
-    df["defcon_points"] = ((actions.to_numpy() >= threshold) & np.isfinite(threshold)).astype(float) * 2.0
+    steps = np.where(np.isfinite(threshold) & (threshold > 0), np.floor(actions.to_numpy(dtype=float) / threshold), 0.0)
+    df["defcon_points"] = steps.astype(float) * 2.0
     return df
 
 
@@ -97,9 +95,7 @@ def calculate_per_90_metrics(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["cbi_per_90"] = 0.0
     
-    # Defensive actions per 90 (kept for context), but cap it to the match-level threshold.
-    # Rationale: FPL defensive contribution scoring is capped (0/2 points), so raw action
-    # volume above the threshold should not keep increasing model signal.
+    # Defensive actions per 90 (for context/role inference).
     if "defcon_actions" in df.columns:
         actions = pd.to_numeric(df["defcon_actions"], errors="coerce").fillna(0.0)
     elif "tackles" in df.columns and "clearances_blocks_interceptions" in df.columns:
@@ -108,14 +104,7 @@ def calculate_per_90_metrics(df: pd.DataFrame) -> pd.DataFrame:
         actions = pd.Series([0.0] * len(df), index=df.index)
 
     per90 = actions / minutes_per_90
-
-    pos_norm = df.get("position", pd.Series(["" for _ in range(len(df))], index=df.index)).astype(str).str.strip().str.lower()
-    is_def = pos_norm.isin(["defender", "def", "df"])
-    is_gk = pos_norm.isin(["goalkeeper", "gk"])
-    is_mid_fwd = ~(is_def | is_gk)
-    threshold = np.where(is_def.to_numpy(), 10.0, np.where(is_mid_fwd.to_numpy(), 12.0, np.inf))
-
-    df["defcon_actions_per_90"] = np.minimum(per90.to_numpy(dtype=float), threshold)
+    df["defcon_actions_per_90"] = per90.to_numpy(dtype=float)
     
     # Combined tackles + cbi per 90
     if "tackles" in df.columns and "clearances_blocks_interceptions" in df.columns:
@@ -124,6 +113,77 @@ def calculate_per_90_metrics(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["cbit_per_90"] = 0.0
     
+    return df
+
+
+def calculate_forward_xg_dampening(df: pd.DataFrame) -> pd.DataFrame:
+    """Dampen xG for FWDs using a small historical finishing premium.
+
+    Implements: 85% xG baseline + 15% historical goal-rate premium.
+    Non-forwards are left unchanged.
+    """
+    df = df.copy()
+
+    if "expected_goals_per_90" not in df.columns:
+        return df
+
+    if "pos_fwd" in df.columns:
+        is_fwd = pd.to_numeric(df["pos_fwd"], errors="coerce").fillna(0.0) > 0.5
+    else:
+        pos_norm = df.get("position", "").astype(str).str.strip().str.lower()
+        is_fwd = pos_norm.isin(["forward", "fwd", "fw", "striker"])
+
+    minutes = pd.to_numeric(df.get("minutes", 0.0), errors="coerce").fillna(0.0)
+    minutes_per_90 = np.maximum(minutes / 90.0, 0.01)
+
+    goals_raw = None
+    for c in ("goals_scored", "goals"):
+        if c in df.columns:
+            goals_raw = pd.to_numeric(df.get(c, 0.0), errors="coerce").fillna(0.0)
+            break
+    if goals_raw is None:
+        return df
+
+    goals_per_90 = goals_raw / minutes_per_90
+    xg90 = pd.to_numeric(df["expected_goals_per_90"], errors="coerce").fillna(0.0)
+
+    adj = 0.85 * xg90.to_numpy(dtype=float) + 0.15 * goals_per_90.to_numpy(dtype=float)
+    df.loc[is_fwd, "expected_goals_per_90"] = adj[is_fwd.to_numpy()]
+    return df
+
+
+def calculate_bps_bonus_proxy(df: pd.DataFrame) -> pd.DataFrame:
+    """Very simple BPS expected-bonus proxy from ICT components.
+
+    This is intentionally lightweight: it gives the model a signal for bonus
+    (2-5 pts in practice) without implementing the full BPS ruleset.
+    """
+    df = df.copy()
+
+    for c in ("influence", "creativity", "threat"):
+        if c not in df.columns:
+            df["bps_bonus_proxy"] = 0.0
+            return df
+    if "gw" not in df.columns:
+        df["bps_bonus_proxy"] = 0.0
+        return df
+
+    def _z(s: pd.Series) -> pd.Series:
+        mu = s.mean()
+        sd = s.std(ddof=0)
+        if not np.isfinite(sd) or sd <= 1e-9:
+            sd = 1.0
+        return (s - mu) / sd
+
+    inf_z = df.groupby("gw", sort=False)["influence"].transform(_z)
+    cre_z = df.groupby("gw", sort=False)["creativity"].transform(_z)
+    thr_z = df.groupby("gw", sort=False)["threat"].transform(_z)
+
+    score = 0.6 * inf_z + 0.2 * cre_z + 0.2 * thr_z
+    prob = 1.0 / (1.0 + np.exp(-score.clip(-10, 10)))
+
+    # Map to an expected bonus in roughly [0..2].
+    df["bps_bonus_proxy"] = (2.0 * prob).astype(float)
     return df
 
 
@@ -472,11 +532,13 @@ def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
     
     # Apply transformations in sequence
     df = calculate_position_features(df)
+    df = calculate_bps_bonus_proxy(df)
     df = calculate_availability_probabilities(df)
     df = calculate_market_log_features(df)
     df = calculate_availability_features(df)
     df = calculate_defensive_contribution_points(df)
     df = calculate_per_90_metrics(df)
+    df = calculate_forward_xg_dampening(df)
     df = calculate_performance_vs_expectation(df)
     df = calculate_expected_points_proxy(df)
     df = calculate_rolling_features(df, windows=[3, 5])

@@ -50,6 +50,9 @@ CORE_PREDICTORS: list[str] = [
     "threat",
     "form",
 
+    # Engineered: lightweight expected bonus proxy from ICT components
+    "bps_bonus_proxy",
+
     # Position flags (engineered from season players.csv metadata)
     "pos_gk",
     "pos_def",
@@ -59,7 +62,7 @@ CORE_PREDICTORS: list[str] = [
 
 # Performance Enhancers: Advanced defensive & efficiency metrics
 PERFORMANCE_ENHANCERS: list[str] = [
-    # Align with FPL 2025/26 scoring cap for defensive contributions
+    # Align with FPL 2025/26 scoring logic for defensive contributions
     # Role-weighted defensive channels (feature_engineering.calculate_role_weighted_features)
     "defcon_points_def",
     "defcon_points_gk",

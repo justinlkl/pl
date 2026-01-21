@@ -140,6 +140,9 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "creativity": 0.2,
         "influence": 0.3,
         "ict_index": 0.3,
+
+        # Bonus proxy
+        "bps_bonus_proxy": 0.6,
         # Market/availability
         "now_cost_log1p": 0.25,
         "selected_by_percent_log1p": 0.4,
@@ -170,6 +173,9 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "creativity": 0.4,
         "influence": 0.7,
         "ict_index": 0.6,
+
+        # Bonus proxy
+        "bps_bonus_proxy": 0.65,
         # Market/availability
         "now_cost_log1p": 0.25,
         "selected_by_percent_log1p": 0.4,
@@ -196,12 +202,15 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "influence": 0.85,
         "ict_index": 0.8,
 
+        # Bonus proxy
+        "bps_bonus_proxy": 0.45,
+
         # Reduce "minutes consistency" dominance
-        "minutes": 0.55,
-        "starts": 0.65,
-        "rolling_5_minutes": 0.55,
+        "minutes": 0.35,
+        "starts": 0.40,
+        "rolling_5_minutes": 0.35,
         "rolling_5_points": 0.6,
-        "form": 0.75,
+        "form": 1.3,
         "value_season": 0.7,
         "now_cost_log1p": 0.25,
         "selected_by_percent_log1p": 0.4,
@@ -226,11 +235,14 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "creativity": 1.1,
         "influence": 0.9,
         "ict_index": 0.9,
-        "minutes": 0.65,
-        "starts": 0.75,
-        "rolling_5_minutes": 0.6,
+
+        # Bonus proxy
+        "bps_bonus_proxy": 0.6,
+        "minutes": 0.5,
+        "starts": 0.6,
+        "rolling_5_minutes": 0.45,
         "rolling_5_points": 0.8,
-        "form": 1.0,
+        "form": 1.3,
         "value_season": 0.75,
         # Regression signals
         "gi_minus_xgi": 0.6,
@@ -260,11 +272,14 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "threat": 1.0,
         "creativity": 1.0,
         "ict_index": 0.85,
-        "minutes": 0.6,
-        "starts": 0.7,
-        "rolling_5_minutes": 0.55,
+
+        # Bonus proxy
+        "bps_bonus_proxy": 0.55,
+        "minutes": 0.45,
+        "starts": 0.55,
+        "rolling_5_minutes": 0.45,
         "rolling_5_points": 0.75,
-        "form": 0.95,
+        "form": 1.2,
         "value_season": 0.75,
         "now_cost_log1p": 0.25,
         "selected_by_percent_log1p": 0.4,
@@ -282,18 +297,21 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "rolling_5_defensive_fwd": 0.05,
         # Attack prioritized
         "expected_goal_involvements_per_90": 1.4,
-        "expected_goals_per_90": 1.5,
+        "expected_goals_per_90": 1.2,
         "expected_assists_per_90": 0.9,
         "expected_goals_conceded_per_90": 0.05,
         "threat": 1.0,
         "creativity": 0.5,
         "influence": 0.7,
         "ict_index": 0.9,
+
+        # Bonus proxy
+        "bps_bonus_proxy": 0.55,
         "minutes": 0.7,
         "starts": 0.8,
         "rolling_5_minutes": 0.65,
         "rolling_5_points": 0.8,
-        "form": 1.0,
+        "form": 1.2,
         "value_season": 0.75,
         # Regression
         "gi_minus_xgi": 0.6,
