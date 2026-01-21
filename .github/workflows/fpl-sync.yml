@@ -1,130 +1,115 @@
 name: FPL Auto-Sync & Model Run
 
 on:
-  schedule:
-    - cron: '0 5 * * *'
-    - cron: '0 21 * * *'
-  workflow_dispatch:
+  name: FPL Auto-Sync & Model Run
 
-env:
-  DATA_REPO_URL: https://github.com/olbauday/FPL-Core-Insights.git
-  DATA_DIR: ../fpl_data
-  TZ: Asia/Hong_Kong
+  on:
+    schedule:
+      # FPL-Core-Insights refreshes ~05:00 and ~17:00 UTC.
+      # Run a few minutes after to reduce the chance of syncing mid-update.
+      - cron: '10 5 * * *'
+      - cron: '10 17 * * *'
+    workflow_dispatch:
 
-jobs:
-  sync-and-model:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    
-    steps:
-      - name: Checkout model repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+  permissions:
+    contents: write
 
-      - name: Set up R environment
-        uses: r-lib/actions/setup-r@v2
-        with:
-          r-version: '4.3'
-          use-public-rspm: true
+  concurrency:
+    group: fpl-auto-sync
+    cancel-in-progress: true
 
-      - name: Install R packages
-        run: |
-          install.packages(c("tidyverse", "data.table", "lubridate", "jsonlite"))
-        shell: Rscript {0}
+  env:
+    DATA_REPO_URL: https://github.com/olbauday/FPL-Core-Insights.git
+    DATA_BRANCH: main
+    PYTHON_VERSION: '3.10'
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+  jobs:
+    sync-and-run:
+      runs-on: ubuntu-latest
+      timeout-minutes: 30
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          if [ -f requirements-ensemble.txt ]; then pip install -r requirements-ensemble.txt; fi
+      steps:
+        - name: Checkout model repository
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
 
-      - name: Clone FPL data repository
-        run: |
-          echo "📥 Cloning FPL-Core-Insights..."
-          git clone --depth 1 ${{ env.DATA_REPO_URL }} ${{ env.DATA_DIR }}
-          echo "✓ Data repository cloned"
-          echo "CSV files found: $(find ${{ env.DATA_DIR }} -name '*.csv' 2>/dev/null | wc -l)"
+        - name: Set up Python
+          uses: actions/setup-python@v5
+          with:
+            python-version: ${{ env.PYTHON_VERSION }}
+            cache: pip
 
-      - name: Show environment info
-        run: |
-          echo "════════════════════════════════════════════════════════"
-          echo "📊 FPL DATA UPDATE"
-          echo "════════════════════════════════════════════════════════"
-          echo "Time (UTC): $(date -u +'%Y-%m-%d %H:%M:%S')"
-          echo "Time (HK): $(TZ=Asia/Hong_Kong date +'%Y-%m-%d %H:%M:%S')"
-          echo "Data directory: ${{ env.DATA_DIR }}"
-          echo "════════════════════════════════════════════════════════"
+        - name: Install Python dependencies
+          run: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
 
-      - name: Run R data loading
-        env:
-          DATA_DIR: ${{ env.DATA_DIR }}/data
-        run: |
-          echo "🚀 Running R data loading script..."
-          Rscript main_fpl_model.R
-          echo "✓ R script completed"
+        - name: Sync FPL-Core-Insights dataset
+          run: |
+            set -e
+            echo "📥 Syncing FPL-Core-Insights..."
 
-      - name: Run projection model (generate_site.py)
-        run: |
-          echo "🤖 Running projection model..."
-          python scripts/generate_site.py
-          echo "✓ Projection model completed"
-        continue-on-error: true
+            if [ -d "FPL-Core-Insights/.git" ]; then
+              echo "Found existing FPL-Core-Insights checkout; hard-resetting to origin/${DATA_BRANCH}"
+              git -C FPL-Core-Insights fetch --depth=1 origin ${DATA_BRANCH}
+              git -C FPL-Core-Insights reset --hard FETCH_HEAD
+            else
+              rm -rf FPL-Core-Insights
+              git clone --depth 1 --branch ${DATA_BRANCH} ${DATA_REPO_URL} FPL-Core-Insights
+            fi
 
-      - name: Commit and push results
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git add results/ outputs/ 2>/dev/null || true
-          
-          if git diff --cached --quiet; then
-            echo "✓ No changes to commit"
-          else
-            git commit -m "🔄 Auto FPL update: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-            git push origin main
-            echo "✓ Changes pushed to repository"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+            echo "✓ Data synced"
+            echo "Latest data commit: $(git -C FPL-Core-Insights rev-parse --short HEAD)"
+            echo "CSV count: $(find FPL-Core-Insights/data -name '*.csv' | wc -l)"
 
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fpl-model-output-${{ github.run_id }}
-          path: |
-            results/
-            outputs/
-          retention-days: 30
+        - name: Run projection model
+          run: |
+            set -e
+            echo "🤖 Generating projections (ensemble_predict)..."
+            python -m src.fpl_projection.ensemble_predict \
+              --ensemble-dir artifacts/ensemble \
+              --mid-split \
+              --backend sklearn
 
-      - name: Create job summary
-        if: always()
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## ✅ FPL Auto-Sync & Model Execution Summary
-          
-          | Property | Value |
+            echo "✓ Wrote outputs/projections.csv + outputs/projections_internal.csv"
+
+        - name: Regenerate static site JSON
+          run: |
+            set -e
+            echo "🧱 Regenerating site data..."
+            python scripts/generate_site.py
+
+        - name: Commit and push results
+          run: |
+            set -e
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            # Commit only the generated artifacts that power your hosted site.
+            git add \
+              outputs/projections.csv \
+              outputs/projections_internal.csv \
+              site/data/projections.json \
+              site/projections.json
+
+            if git diff --cached --quiet; then
+              echo "✓ No changes to commit"
+              exit 0
+            fi
+
+            git commit -m "🔄 Auto update projections ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+            git push
+
+        - name: Upload run artifacts
+          if: always()
+          uses: actions/upload-artifact@v4
+          with:
+            name: fpl-projections-${{ github.run_id }}
+            path: |
+              outputs/projections.csv
+              outputs/projections_internal.csv
+              site/data/projections.json
+              site/projections.json
+            retention-days: 14
           |----------|-------|
-          | **Status** | ${{ job.status }} |
-          | **Run ID** | ${{ github.run_id }} |
-          | **Timestamp (UTC)** | $(date -u +'%Y-%m-%d %H:%M:%S') |
-          | **Timestamp (HK)** | $(TZ=Asia/Hong_Kong date +'%Y-%m-%d %H:%M:%S') |
-          | **Data Source** | FPL-Core-Insights |
-          | **Model** | Projection model (generate_site.py) |
-          
-          ### 📊 Daily Schedule
-          - Morning: 5:00 AM UTC = 1:00 PM HK
-          - Evening: 5:00 PM UTC = 1:00 AM HK (next day)
-          
-          ### 🔗 Links
-          - [View Repository](https://github.com/justinlkl/pl)
-          - [View FPL Data Source](https://github.com/olbauday/FPL-Core-Insights)
-          EOF
