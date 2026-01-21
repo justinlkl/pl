@@ -74,7 +74,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: fpl-output-${{ github.run_id }}
           path: results/
@@ -96,4 +96,8 @@ jobs:
           ### 📊 Schedule
           - Morning: 5 AM UTC = 1 PM HK
           - Evening: 5 PM UTC = 1 AM HK (next day)
+          
+          ### 📂 Data Sources
+          - FPL: [FPL-Core-Insights](https://github.com/olbauday/FPL-Core-Insights)
+          - Model: [justinlkl/pl](https://github.com/justinlkl/pl)
           EOF
