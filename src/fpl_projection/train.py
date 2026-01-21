@@ -198,6 +198,122 @@ def _permutation_importance_mae(
     return out
 
 
+def evaluate_fpl_model(
+    *,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    player_id: np.ndarray,
+    roles: np.ndarray,
+    top_n: int = 50,
+    n_calibration_bins: int = 10,
+) -> tuple[dict[str, float], pd.DataFrame, pd.DataFrame]:
+    """Compute ranking-centric diagnostics for FPL.
+
+    Metrics are computed at player-level by aggregating test sequences per player.
+
+    Returns:
+        metrics: Flat dict with overall metrics and per-role MAE entries.
+        calib_bins: Calibration bins on player-level totals.
+        per_role: Per-role MAE table on player-level totals.
+    """
+
+    def _spearman(a: np.ndarray, b: np.ndarray) -> float:
+        a = np.asarray(a, dtype=float).reshape(-1)
+        b = np.asarray(b, dtype=float).reshape(-1)
+        mask = np.isfinite(a) & np.isfinite(b)
+        if int(np.sum(mask)) < 3:
+            return float("nan")
+        ra = pd.Series(a[mask]).rank(method="average").to_numpy(dtype=float)
+        rb = pd.Series(b[mask]).rank(method="average").to_numpy(dtype=float)
+        ra = ra - float(np.mean(ra))
+        rb = rb - float(np.mean(rb))
+        denom = float(np.sqrt(np.sum(ra**2)) * np.sqrt(np.sum(rb**2)))
+        if denom == 0.0:
+            return float("nan")
+        return float(np.sum(ra * rb) / denom)
+
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.ndim == 2:
+        true_total = np.sum(y_true, axis=1)
+    else:
+        true_total = y_true.reshape(y_true.shape[0], -1).sum(axis=1)
+    if y_pred.ndim == 2:
+        pred_total = np.sum(y_pred, axis=1)
+    else:
+        pred_total = y_pred.reshape(y_pred.shape[0], -1).sum(axis=1)
+
+    df = pd.DataFrame(
+        {
+            "player_id": np.asarray(player_id).astype(int),
+            "role": np.asarray(roles, dtype=object).astype(str),
+            "true_total": true_total,
+            "pred_total": pred_total,
+        }
+    )
+
+    # Aggregate sequences to player-level. Keep a stable role per player (mode).
+    def _mode(series: pd.Series) -> str:
+        vc = series.value_counts(dropna=False)
+        return str(vc.index[0]) if not vc.empty else ""
+
+    by_player = (
+        df.groupby("player_id", as_index=False)
+        .agg(
+            true_total=("true_total", "mean"),
+            pred_total=("pred_total", "mean"),
+            role=("role", _mode),
+        )
+        .reset_index(drop=True)
+    )
+
+    overall_mae = float(np.mean(np.abs(by_player["pred_total"] - by_player["true_total"])))
+    rank_corr = _spearman(by_player["pred_total"].to_numpy(), by_player["true_total"].to_numpy())
+
+    k = int(min(max(top_n, 1), len(by_player)))
+    top_true = set(by_player.nlargest(k, "true_total")["player_id"].astype(int).tolist())
+    top_pred = set(by_player.nlargest(k, "pred_total")["player_id"].astype(int).tolist())
+    top_k_recall = float(len(top_true & top_pred) / float(k)) if k > 0 else float("nan")
+
+    calib_bins = _calibration_bins(
+        by_player["pred_total"].to_numpy(),
+        by_player["true_total"].to_numpy(),
+        n_bins=int(n_calibration_bins),
+    )
+    if calib_bins.empty:
+        calib_error = float("nan")
+        calib_error_rel = float("nan")
+    else:
+        weights = calib_bins["count"].to_numpy(dtype=float)
+        diffs = np.abs(calib_bins["pred_mean"].to_numpy(dtype=float) - calib_bins["actual_mean"].to_numpy(dtype=float))
+        calib_error = float(np.sum(weights * diffs) / np.sum(weights))
+        denom = float(np.mean(by_player["true_total"]))
+        calib_error_rel = float(calib_error / denom) if denom > 0 else float("nan")
+
+    per_role_rows: list[dict] = []
+    for role, g in by_player.groupby("role"):
+        per_role_rows.append(
+            {
+                "role": str(role),
+                "count": int(len(g)),
+                "mae": float(np.mean(np.abs(g["pred_total"] - g["true_total"]))),
+            }
+        )
+    per_role = pd.DataFrame(per_role_rows).sort_values(["role"]).reset_index(drop=True)
+
+    metrics: dict[str, float] = {
+        "rank_correlation": float(rank_corr),
+        f"top_{k}_recall": float(top_k_recall),
+        "calibration_error": float(calib_error),
+        "calibration_error_rel": float(calib_error_rel),
+        "mae": float(overall_mae),
+    }
+    for _, r in per_role.iterrows():
+        metrics[f"mae_{r['role']}"] = float(r["mae"])
+
+    return metrics, calib_bins, per_role
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train LSTM model for FPL point projections")
     parser.add_argument("--season", default="2025-2026")
@@ -383,6 +499,22 @@ def main() -> None:
         test_loss, test_mae = model.evaluate(X_test, test_subset.y, verbose=0)
         print(f"{role} Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}")
 
+        # Ranking-centric diagnostics on this role's slice.
+        pred = model.predict(X_test, verbose=0)
+        metrics, calib_bins, per_role = evaluate_fpl_model(
+            y_true=test_subset.y,
+            y_pred=pred,
+            player_id=test_subset.player_id,
+            roles=np.asarray([role] * len(test_subset.player_id), dtype=object),
+            top_n=50,
+            n_calibration_bins=10,
+        )
+        print(
+            f"{role} rank_corr={metrics['rank_correlation']:.3f} "
+            f"top_50_recall={metrics.get('top_50_recall', float('nan')):.3f} "
+            f"calib_err_rel={metrics['calibration_error_rel']:.3f}"
+        )
+
         model_path = out_dir / "model.keras"
         preprocess_path = out_dir / "preprocess.joblib"
         metadata_path = out_dir / "meta.json"
@@ -401,6 +533,10 @@ def main() -> None:
             "feature_columns": feature_cols,
             "test_loss": float(test_loss),
             "test_mae": float(test_mae),
+            "rank_correlation": float(metrics["rank_correlation"]),
+            "top_50_recall": float(metrics.get("top_50_recall", float("nan"))),
+            "calibration_error": float(metrics["calibration_error"]),
+            "calibration_error_rel": float(metrics["calibration_error_rel"]),
             "epochs_trained": int(len(history.history["loss"])),
             "final_train_loss": float(history.history["loss"][-1]),
             "final_val_loss": float(history.history["val_loss"][-1]),
@@ -411,10 +547,11 @@ def main() -> None:
         if args.diagnostics:
             diag_dir = artifacts_dir / "diagnostics"
             diag_dir.mkdir(parents=True, exist_ok=True)
-            pred = model.predict(X_test, verbose=0)
             baseline_mae = float(np.mean(np.abs(pred - test_subset.y)))
-            calib = _calibration_bins(pred, test_subset.y, n_bins=10)
-            calib.to_csv(diag_dir / f"calibration_{role}.csv", index=False)
+            calib_bins.to_csv(diag_dir / f"calibration_{role}.csv", index=False)
+            per_role.to_csv(diag_dir / f"per_role_{role}.csv", index=False)
+            with open(diag_dir / f"metrics_{role}.json", "w") as f:
+                json.dump(metrics, f, indent=2)
 
             if args.permute_max_features and args.permute_max_features > 0:
                 pimps = _permutation_importance_mae(
@@ -603,6 +740,32 @@ def main() -> None:
     test_loss, test_mae = model.evaluate(X_test, y_test, sample_weight=sw_test, verbose=0)
     print(f"Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}")
 
+    # Ranking-centric diagnostics: compute from raw y and predictions.
+    pred = model.predict(X_test, verbose=0)
+    y_true_for_metrics = y_test[..., 0] if (y_test.ndim == 3 and y_test.shape[-1] >= 1) else y_test
+    metrics, calib_bins, per_role = evaluate_fpl_model(
+        y_true=y_true_for_metrics,
+        y_pred=pred,
+        player_id=test_ds.player_id,
+        roles=test_roles,
+        top_n=50,
+        n_calibration_bins=10,
+    )
+    print(
+        "Test ranking diagnostics: "
+        f"rank_corr={metrics['rank_correlation']:.3f} "
+        f"top_50_recall={metrics.get('top_50_recall', float('nan')):.3f} "
+        f"calib_err_rel={metrics['calibration_error_rel']:.3f}"
+    )
+
+    if args.diagnostics:
+        diag_dir = artifacts_dir / "diagnostics"
+        diag_dir.mkdir(parents=True, exist_ok=True)
+        calib_bins.to_csv(diag_dir / "calibration_ALL.csv", index=False)
+        per_role.to_csv(diag_dir / "per_role_ALL.csv", index=False)
+        with open(diag_dir / "metrics_ALL.json", "w") as f:
+            json.dump(metrics, f, indent=2)
+
     model_path = artifacts_dir / "model.keras"
     preprocess_path = artifacts_dir / "preprocess.joblib"
     metadata_path = artifacts_dir / "meta.json"
@@ -621,6 +784,10 @@ def main() -> None:
         "feature_columns": available_features,
         "test_loss": float(test_loss),
         "test_mae": float(test_mae),
+        "rank_correlation": float(metrics["rank_correlation"]),
+        "top_50_recall": float(metrics.get("top_50_recall", float("nan"))),
+        "calibration_error": float(metrics["calibration_error"]),
+        "calibration_error_rel": float(metrics["calibration_error_rel"]),
         "epochs_trained": len(history.history["loss"]),
         "final_train_loss": float(history.history["loss"][-1]),
         "final_val_loss": float(history.history["val_loss"][-1]),
