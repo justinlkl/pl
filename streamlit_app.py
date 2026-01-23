@@ -40,7 +40,7 @@ def get_shirt_url(team_code: int) -> str:
 
 
 STAT_GLOSSARY: dict[str, str] = {
-    "£M": "Price in £m",
+    "Â£M": "Price in Â£m",
     "App": "Appearances / starts proxy (starts)",
     "Mins": "Minutes played",
     "S": "Starts",
@@ -72,7 +72,7 @@ STAT_GLOSSARY: dict[str, str] = {
 STAT_FULL_NAMES: dict[str, str] = {
     "Name": "Name",
     "Club": "Club",
-    "£M": "Price (£m)",
+    "Â£M": "Price (Â£m)",
     "App": "Appearances",
     "Mins": "Minutes",
     "S": "Starts",
@@ -438,10 +438,10 @@ def normalize_projections(df: pd.DataFrame) -> pd.DataFrame:
     if "now_cost" in lower_to_col:
         price_col = lower_to_col["now_cost"]
     else:
-        price_col = next((c for c in df.columns if str(c).lower() in ("price", "value", "£m")), None)
+        price_col = next((c for c in df.columns if str(c).lower() in ("price", "value", "Â£m")), None)
     if price_col:
         price = pd.to_numeric(df[price_col], errors="coerce")
-        # FPL now_cost is in tenths (e.g., 75 => £7.5m)
+        # FPL now_cost is in tenths (e.g., 75 => Â£7.5m)
         if str(price_col).lower() == "now_cost":
             price = price / 10.0
         elif price.max() > 1000:
@@ -990,7 +990,7 @@ def build_key_stats_view(
         {
             "Name": df.get("web_name", pd.Series(dtype=str)),
             "Club": df.get("team", pd.Series(dtype=str)),
-            "£M": df.get("price", 0),
+            "Â£M": df.get("price", 0),
             "App": df.get("starts", pd.Series(dtype=float)),
             "Mins": minutes,
             "S": df.get("starts", pd.Series(dtype=float)),
@@ -1028,7 +1028,7 @@ def build_key_stats_view(
     # Optional per-90 view (skip identifiers / price)
     if per_90:
         # Only convert underlying action metrics; keep point-like columns as-is.
-        do_not_convert = {"Name", "Club", "£M", "Mins", "xPts", "P10", "P50", "P90", "BPS", "B", "Pts", "Min%"}
+        do_not_convert = {"Name", "Club", "Â£M", "Mins", "xPts", "P10", "P50", "P90", "BPS", "B", "Pts", "Min%"}
         for c in list(view.columns):
             if str(c).startswith("%"):
                 do_not_convert.add(c)
@@ -1041,7 +1041,7 @@ def build_key_stats_view(
         view = view.rename(columns=rename_map)
 
     # Drop columns that are fully empty (this gets rid of OT/BC/Pxx when projections file doesn't include them)
-    view = _drop_empty_columns(view, keep=["Name", "Club", "£M"])
+    view = _drop_empty_columns(view, keep=["Name", "Club", "Â£M"])
 
     if use_full_names:
         view = view.rename(columns={k: v for k, v in STAT_FULL_NAMES.items() if k in view.columns})
@@ -1169,7 +1169,7 @@ def _render_ticker_html(
 
             html.append(
                 "<td style='padding:6px 10px;background:#fff;border:1px solid #eee;border-radius:10px;text-align:center'>"
-                + (cell or "<span style='color:#bbb'>—</span>")
+                + (cell or "<span style='color:#bbb'>â€”</span>")
                 + "</td>"
             )
         html.append("</tr>")
@@ -1279,7 +1279,7 @@ def _render_pitch_html(starters_df: pd.DataFrame, bench_df: pd.DataFrame) -> str
             "border-radius:10px;padding:6px 8px;text-align:center;border:1px solid rgba(0,0,0,0.06)'>"
             f"<div style='margin-bottom:4px'>{badge_or_fallback(team)}</div>"
             f"<div style='font-weight:700;font-size:12px;line-height:14px'>{name}</div>"
-            f"<div style='font-size:11px;color:#555'>£{price:.1f}m</div>"
+            f"<div style='font-size:11px;color:#555'>Â£{price:.1f}m</div>"
             "</div>"
         )
 
@@ -1354,7 +1354,7 @@ def _render_interactive_cards(
     st.session_state.setdefault(role_key, None)
 
     st.markdown(f"**{title}**")
-    st.caption("Swap: click 🔴↓ on a starter, then 🟢↑ on a bench player (or vice versa).")
+    st.caption("Swap: click ðŸ”´â†“ on a starter, then ðŸŸ¢â†‘ on a bench player (or vice versa).")
 
     starters_df = team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy()
     bench_df = team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy()
@@ -1396,7 +1396,7 @@ def _render_interactive_cards(
         a, b, c = st.columns([1, 10, 1])
         with a:
             if role == "starter":
-                if st.button("🔴↓", key=f"{state_prefix}_down_{pid}", help="Select starter to bench"):
+                if st.button("ðŸ”´â†“", key=f"{state_prefix}_down_{pid}", help="Select starter to bench"):
                     sel = st.session_state.get(sel_key)
                     sel_role = st.session_state.get(role_key)
                     if sel is None:
@@ -1406,7 +1406,7 @@ def _render_interactive_cards(
                     else:
                         _attempt_swap(int(sel), str(sel_role), pid, "starter")
             else:
-                if st.button("🟢↑", key=f"{state_prefix}_up_{pid}", help="Select bench to start"):
+                if st.button("ðŸŸ¢â†‘", key=f"{state_prefix}_up_{pid}", help="Select bench to start"):
                     sel = st.session_state.get(sel_key)
                     sel_role = st.session_state.get(role_key)
                     if sel is None:
@@ -1454,9 +1454,9 @@ def _render_interactive_cards(
                 "onerror=\"this.src='https://via.placeholder.com/80x80?text=N%2FA'\"/>"
                 "<div style='flex:1'>"
                 f"<div style='font-weight:900;font-size:14px;color:#111'>{r.get('web_name')}</div>"
-                f"<div style='color:#6b7280;font-size:12px'>{badge_html}{r.get('team')} · {r.get('position')}</div>"
+                f"<div style='color:#6b7280;font-size:12px'>{badge_html}{r.get('team')} Â· {r.get('position')}</div>"
                 "<div style='margin-top:6px;display:flex;justify-content:space-between;align-items:center'>"
-                f"<span style='font-weight:800;color:#111'>£{float(r.get('price',0) or 0):.1f}m</span>"
+                f"<span style='font-weight:800;color:#111'>Â£{float(r.get('price',0) or 0):.1f}m</span>"
                 f"<span style='font-weight:800;color:#065f46;background:rgba(0,255,135,0.20);padding:2px 8px;border-radius:999px;font-size:12px'>"
                 f"Pred {float(r.get('proj_points',0) or 0):.1f}"
                 "</span>"
@@ -1469,12 +1469,12 @@ def _render_interactive_cards(
 
         with c:
             if allow_remove:
-                if st.button("❌", key=f"{state_prefix}_rm_{pid}", help="Remove from squad"):
+                if st.button("â�Œ", key=f"{state_prefix}_rm_{pid}", help="Remove from squad"):
                     if on_remove_player:
                         on_remove_player(pid)
                     st.rerun()
             else:
-                st.button("✖", key=f"{state_prefix}_rm_disabled_{pid}", disabled=True)
+                st.button("âœ–", key=f"{state_prefix}_rm_disabled_{pid}", disabled=True)
 
     st.markdown("### Starters")
     starter_sort_cols = [c for c in ["position", "proj_points"] if c in starters_df.columns]
@@ -1535,7 +1535,7 @@ def load_projections() -> pd.DataFrame:
 def main():
     st.set_page_config(
         page_title="FPL Analytics Hub",
-        page_icon="⚽",
+        page_icon="âš½",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -1567,7 +1567,7 @@ def main():
     st.markdown(
         """
 <div class="header-container">
-    <h1>⚽ FPL Analytics Hub</h1>
+    <h1>âš½ FPL Analytics Hub</h1>
     <p>Professional Fantasy Premier League Planning & Predictions</p>
 </div>
 """,
@@ -1670,7 +1670,7 @@ def main():
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.metric("Total Cost", f"£{float(team_df.get('price', 0).fillna(0).sum()):.1f}m")
+                    st.metric("Total Cost", f"Â£{float(team_df.get('price', 0).fillna(0).sum()):.1f}m")
                 with c2:
                     st.metric("Projected Points", f"{float(team_df.get('proj_points', 0).fillna(0).sum()):.1f}")
             else:
@@ -1721,7 +1721,7 @@ def main():
                 gw_max = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().max())
 
                 if gw_min > gw_max:
-                    st.warning(f"No fixtures available (GW {gw_min}–{gw_max}).")
+                    st.warning(f"No fixtures available (GW {gw_min}â€“{gw_max}).")
                     st.stop()
 
                 if gw_min == gw_max:
@@ -1806,7 +1806,7 @@ def main():
             if sel:
                 p = pf_df[pf_df["web_name"] == sel].iloc[0]
                 st.markdown(
-                    f"### {p.get('web_name')} — {p.get('team','')} · {p.get('position','')} · £{p.get('price',0):.1f}m"
+                    f"### {p.get('web_name')} â€” {p.get('team','')} Â· {p.get('position','')} Â· Â£{p.get('price',0):.1f}m"
                 )
 
                 cols = st.columns([1, 1, 1])
@@ -1820,7 +1820,7 @@ def main():
     # Tab: Transfer Planner (kept close to your original)
     with tabs[5]:
         st.subheader("Transfer Planner")
-        st.caption("Squad rules enforced: £100.0m budget · Max 3 per club · 2 GK / 5 DEF / 5 MID / 3 FWD (15 total)")
+        st.caption("Squad rules enforced: Â£100.0m budget Â· Max 3 per club Â· 2 GK / 5 DEF / 5 MID / 3 FWD (15 total)")
 
         try:
 
@@ -1884,10 +1884,10 @@ def main():
                 st.markdown(_render_pitch_html(starters_df, bench_df), unsafe_allow_html=True)
 
                 summary = _team_summary(team_df)
-                st.metric("Team Cost", f"£{summary['cost']:.1f}m")
+                st.metric("Team Cost", f"Â£{summary['cost']:.1f}m")
                 st.write(
-                    f"Positions: GK {summary['counts'].get('GK',0)}/2 · DEF {summary['counts'].get('DEF',0)}/5 · "
-                    f"MID {summary['counts'].get('MID',0)}/5 · FWD {summary['counts'].get('FWD',0)}/3"
+                    f"Positions: GK {summary['counts'].get('GK',0)}/2 Â· DEF {summary['counts'].get('DEF',0)}/5 Â· "
+                    f"MID {summary['counts'].get('MID',0)}/5 Â· FWD {summary['counts'].get('FWD',0)}/3"
                 )
 
             with right:
@@ -1939,10 +1939,10 @@ def main():
                         st.markdown(
                             "<div style='background:#fff;border:1px solid #eee;border-radius:12px;padding:10px 12px;margin-bottom:10px'>"
                             f"<div style='display:flex;justify-content:space-between;align-items:center'>"
-                            f"<div style='font-weight:800;font-size:15px'>{badge_html}{name} <span style='color:#999;font-weight:600;font-size:12px'>({team} · {pos})</span></div>"
+                            f"<div style='font-weight:800;font-size:15px'>{badge_html}{name} <span style='color:#999;font-weight:600;font-size:12px'>({team} Â· {pos})</span></div>"
                             f"<div style='color:#111;font-weight:800'>Pred {proj:.1f}</div>"
                             "</div>"
-                            f"<div style='margin-top:6px;color:#444;font-size:12px'>£{price:.1f}m</div>"
+                            f"<div style='margin-top:6px;color:#444;font-size:12px'>Â£{price:.1f}m</div>"
                             "</div>",
                             unsafe_allow_html=True,
                         )
@@ -1955,7 +1955,7 @@ def main():
                             st.caption(reason)
 
         except Exception:
-            st.info("🔜 Advanced transfer planning tool coming soon!")
+            st.info("ðŸ”œ Advanced transfer planning tool coming soon!")
 
 
 if __name__ == "__main__":
