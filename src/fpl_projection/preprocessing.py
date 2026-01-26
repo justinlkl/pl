@@ -21,7 +21,13 @@ class PreprocessArtifacts:
     @staticmethod
     def load(path: str) -> "PreprocessArtifacts":
         obj = load(path)
-        return PreprocessArtifacts(feature_columns=obj["feature_columns"], pipeline=obj["pipeline"])
+        # Defensive: drop known leaky/official prediction columns that
+        # should never be used as features during inference (e.g., ep_next, ep_this).
+        feature_columns = list(obj.get("feature_columns") or [])
+        filtered = [c for c in feature_columns if c not in ("ep_next", "ep_this")]
+        if len(filtered) != len(feature_columns):
+            print(f"Warning: removed leaky feature columns from preprocessor: {set(feature_columns) - set(filtered)}")
+        return PreprocessArtifacts(feature_columns=filtered, pipeline=obj["pipeline"]) 
 
 
 def select_and_coerce_numeric(df: pd.DataFrame, feature_columns: list[str], target_column: str) -> pd.DataFrame:
