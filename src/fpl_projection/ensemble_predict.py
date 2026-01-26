@@ -15,6 +15,7 @@ import tensorflow as tf
 from .config import DEFAULT_FEATURE_COLUMNS, DEFAULT_HORIZON, DEFAULT_SEQ_LENGTH, TARGET_COLUMN
 from .data_loading import load_premier_league_gameweek_stats
 from .preprocessing import PreprocessArtifacts, select_and_coerce_numeric, transform_sequences
+import joblib
 from .role_modeling import (
     build_feature_weight_vector,
     infer_mid_subrole_from_window,
@@ -441,6 +442,24 @@ def main() -> None:
         start_gw = int(last_gw + 1)
     next_gws = list(range(start_gw, start_gw + int(args.horizon)))
 
+    # Attempt to load the original preprocessor object (unfiltered) so we can
+    # build windows in the exact feature order expected by the LSTM + pipeline.
+    raw_pre_obj = None
+    orig_feature_columns = None
+    orig_pipeline = None
+    try:
+        raw_pre_obj = joblib.load(str(ensemble_dir / "preprocess.joblib"))
+        if isinstance(raw_pre_obj, dict):
+            orig_feature_columns = raw_pre_obj.get("feature_columns")
+            orig_pipeline = raw_pre_obj.get("pipeline")
+        else:
+            orig_feature_columns = getattr(raw_pre_obj, "feature_columns", None)
+            orig_pipeline = getattr(raw_pre_obj, "pipeline", None)
+        if orig_feature_columns is not None:
+            orig_feature_columns = list(orig_feature_columns)
+    except Exception:
+        orig_feature_columns = None
+
     # Build last seq_length window per player for LSTM.
     rows: list[dict] = []
     X_list: list[np.ndarray] = []
@@ -464,12 +483,20 @@ def main() -> None:
             continue
 
         window = g.iloc[-args.seq_length:]
-        X_window = window[prep.feature_columns].to_numpy(dtype=float)
-        if X_window.shape != (args.seq_length, len(prep.feature_columns)):
+        # If we have the original feature ordering, reindex the window to that
+        # ordering and fill missing columns with zeros so the shapes match the
+        # model's expected input. Otherwise, fall back to the (possibly
+        # filtered) `prep.feature_columns`.
+        feat_cols = orig_feature_columns if orig_feature_columns is not None else prep.feature_columns
+
+        # Reindex will add missing columns as NaN; fill with 0.0
+        win_df = window.reindex(columns=feat_cols).fillna(0.0)
+        X_window = win_df.to_numpy(dtype=float)
+        if X_window.shape != (args.seq_length, len(feat_cols)):
             continue
 
         X_list.append(X_window)
-        last_feature_rows.append(window.iloc[-1][prep.feature_columns].to_numpy(dtype=float))
+        last_feature_rows.append(win_df.iloc[-1].to_numpy(dtype=float))
 
         web_name = raw.loc[raw["player_id"] == player_id, "web_name"].dropna()
         name = str(web_name.iloc[-1]) if len(web_name) else ""
@@ -487,31 +514,25 @@ def main() -> None:
     print(f"[predict] Built windows for {len(X_list):,} players in {time.perf_counter() - t2:.1f}s")
 
     X = np.stack(X_list, axis=0)
-    # Transform sequences using stored pipeline; if the stored pipeline
-    # expects a different number of features (e.g., because we filtered
-    # leaky columns), fall back to fitting a new pipeline on the current
-    # sequence timesteps to ensure inference can proceed.
+    # Prefer using the original pipeline (if available) because it was
+    # trained on the feature ordering expected by the LSTM model. If it's
+    # not available, use the preprocessor pipeline from `prep`.
+    pipeline_to_use = orig_pipeline if orig_pipeline is not None else prep.pipeline
     try:
-        X = transform_sequences(prep.pipeline, X)
+        X = transform_sequences(pipeline_to_use, X)
     except ValueError as exc:
+        # As a last resort, fit a new pipeline on the current flattened
+        # sequence data and continue.
         msg = str(exc)
-        if "expecting" in msg or "n_features" in msg:
-            print(f"Warning: preprocess pipeline mismatch: {msg}")
-            try:
-                from .preprocessing import fit_preprocessor_on_timesteps
+        print(f"Warning: preprocess pipeline mismatch: {msg}")
+        from .preprocessing import fit_preprocessor_on_timesteps
 
-                seq_n, seq_len, n_feat = X.shape
-                flat = X.reshape(seq_n * seq_len, n_feat)
-                print("Re-fitting preprocessing pipeline on current data (fallback)")
-                new_pipeline = fit_preprocessor_on_timesteps(flat)
-                X = transform_sequences(new_pipeline, X)
-                # Replace prep.pipeline so downstream code (role weights) uses same pipeline shape
-                prep.pipeline = new_pipeline
-            except Exception as exc2:
-                print(f"Failed to auto-refit preprocessing pipeline: {exc2}")
-                raise
-        else:
-            raise
+        seq_n, seq_len, n_feat = X.shape
+        flat = X.reshape(seq_n * seq_len, n_feat)
+        print("Re-fitting preprocessing pipeline on current data (fallback)")
+        new_pipeline = fit_preprocessor_on_timesteps(flat)
+        X = transform_sequences(new_pipeline, X)
+        prep.pipeline = new_pipeline
 
     # Apply per-sample role weights
     uniq = sorted(set(roles))
