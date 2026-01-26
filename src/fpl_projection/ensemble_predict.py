@@ -460,6 +460,11 @@ def main() -> None:
     except Exception:
         orig_feature_columns = None
 
+    # Decide the feature ordering we'll use to build windows. Keep this
+    # stable for both window construction and when building role weight
+    # vectors so shapes remain consistent.
+    feat_cols_for_windows = orig_feature_columns if orig_feature_columns is not None else prep.feature_columns
+
     # Build last seq_length window per player for LSTM.
     rows: list[dict] = []
     X_list: list[np.ndarray] = []
@@ -487,12 +492,10 @@ def main() -> None:
         # ordering and fill missing columns with zeros so the shapes match the
         # model's expected input. Otherwise, fall back to the (possibly
         # filtered) `prep.feature_columns`.
-        feat_cols = orig_feature_columns if orig_feature_columns is not None else prep.feature_columns
-
         # Reindex will add missing columns as NaN; fill with 0.0
-        win_df = window.reindex(columns=feat_cols).fillna(0.0)
+        win_df = window.reindex(columns=feat_cols_for_windows).fillna(0.0)
         X_window = win_df.to_numpy(dtype=float)
-        if X_window.shape != (args.seq_length, len(feat_cols)):
+        if X_window.shape != (args.seq_length, len(feat_cols_for_windows)):
             continue
 
         X_list.append(X_window)
@@ -536,8 +539,24 @@ def main() -> None:
 
     # Apply per-sample role weights
     uniq = sorted(set(roles))
-    role_to_w = {r: build_feature_weight_vector(prep.feature_columns, r) for r in uniq}
-    W = np.stack([role_to_w.get(r, np.ones(len(prep.feature_columns))) for r in roles], axis=0)
+    # Build role weight vectors using the same feature ordering we used
+    # to construct the windows. This avoids mismatches where the saved
+    # `prep.feature_columns` differs from the ordering used by the LSTM.
+    role_to_w = {r: build_feature_weight_vector(feat_cols_for_windows, r) for r in uniq}
+    W = np.stack([role_to_w.get(r, np.ones(len(feat_cols_for_windows))) for r in roles], axis=0)
+
+    # Ensure W matches X's final feature dimension. If the preprocessing
+    # pipeline has altered the feature count (rare), pad new features with
+    # neutral weights (1.0) or trim excess weights to fit.
+    seq_n, seq_len, n_feat = X.shape
+    if W.shape[1] != n_feat:
+        print(f"Warning: role-weight vector size ({W.shape[1]}) != model feature dim ({n_feat}). Adjusting weights.")
+        if W.shape[1] < n_feat:
+            pad = np.ones((W.shape[0], n_feat - W.shape[1]), dtype=W.dtype)
+            W = np.concatenate([W, pad], axis=1)
+        else:
+            W = W[:, :n_feat]
+
     X = X * W[:, None, :]
 
     t3 = time.perf_counter()
