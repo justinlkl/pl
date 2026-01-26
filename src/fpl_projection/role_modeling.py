@@ -300,8 +300,6 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "selected_by_percent_log1p": 0.4,
         "chance_of_playing_next_round": 1.0,
         "chance_of_playing_this_round": 1.0,
-        "ep_next": 0.8,
-        "ep_this": 0.8,
         # Defensive channels if present
         "defcon_points_gk": 1.0,
         "defcon_actions_per_90_gk": 1.0,
@@ -333,8 +331,6 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "selected_by_percent_log1p": 0.4,
         "chance_of_playing_next_round": 1.0,
         "chance_of_playing_this_round": 1.0,
-        "ep_next": 0.8,
-        "ep_this": 0.8,
     },
     ROLE_MID_DM: {
         # Defensive stability should not dominate MID scoring.
@@ -368,8 +364,6 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "selected_by_percent_log1p": 0.4,
         "chance_of_playing_next_round": 1.0,
         "chance_of_playing_this_round": 1.0,
-        "ep_next": 0.8,
-        "ep_this": 0.8,
     },
     ROLE_MID_AM: {
         # Strongly down-weight defensive for AM/Wing
@@ -407,8 +401,6 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "selected_by_percent_log1p": 0.4,
         "chance_of_playing_next_round": 1.0,
         "chance_of_playing_this_round": 1.0,
-        "ep_next": 0.9,
-        "ep_this": 0.9,
     },
     ROLE_MID: {
         # If not splitting mids, use a conservative midpoint.
@@ -437,8 +429,6 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "selected_by_percent_log1p": 0.4,
         "chance_of_playing_next_round": 1.0,
         "chance_of_playing_this_round": 1.0,
-        "ep_next": 0.85,
-        "ep_this": 0.85,
     },
     ROLE_FWD: {
         # Down-weight defensive
@@ -476,8 +466,6 @@ ROLE_WEIGHTS: dict[str, dict[str, float]] = {
         "selected_by_percent_log1p": 0.4,
         "chance_of_playing_next_round": 1.0,
         "chance_of_playing_this_round": 1.0,
-        "ep_next": 0.95,
-        "ep_this": 0.95,
     },
 }
 

@@ -7,6 +7,14 @@ from pathlib import Path
 import pandas as pd
 
 from .feature_engineering import engineer_all_features
+from .insights_schema import (
+    DROP_COLUMNS,
+    ESSENTIAL_MATCH_STATS,
+    ESSENTIAL_PLAYER_STATS,
+    ESSENTIAL_TEAM_STATS,
+    OPTIONAL_STATS,
+    select_insights_columns,
+)
 
 
 def _build_fixture_difficulty_table(*, base: Path, teams_path: Path) -> pd.DataFrame:
@@ -121,6 +129,119 @@ class DataPaths:
         return self.repo_root / "FPL-Core-Insights" / "data"
 
 
+def load_insights_playerstats(
+    *, repo_root: Path, season: str, include_optional: bool = False
+) -> pd.DataFrame:
+    """Load and filter Insights `playerstats.csv`.
+
+    Keeps the columns from `ESSENTIAL_PLAYER_STATS` (+ `OPTIONAL_STATS` if requested)
+    while excluding `DROP_COLUMNS`.
+
+    Returns a normalized dataframe with `player_id` and `gw` as ints when available.
+    """
+
+    paths = DataPaths(repo_root=repo_root)
+    path = paths.insights_data_root / season / "playerstats.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing Insights playerstats.csv at: {path}")
+
+    df = pd.read_csv(path)
+    if df.empty:
+        return df
+
+    keep = list(ESSENTIAL_PLAYER_STATS)
+    if include_optional:
+        keep += list(OPTIONAL_STATS)
+
+    df = select_insights_columns(
+        df,
+        keep=keep,
+        always_keep=("id", "gw"),
+        drop=DROP_COLUMNS,
+        context=f"playerstats.csv ({season})",
+    )
+
+    # Normalize IDs
+    if "id" in df.columns and "player_id" not in df.columns:
+        df = df.rename(columns={"id": "player_id"})
+    if "player_id" in df.columns:
+        df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+    if "gw" in df.columns:
+        df["gw"] = pd.to_numeric(df["gw"], errors="coerce").astype("Int64")
+
+    if "player_id" in df.columns and "gw" in df.columns:
+        df = df.dropna(subset=["player_id", "gw"]).copy()
+        df["player_id"] = df["player_id"].astype(int)
+        df["gw"] = df["gw"].astype(int)
+
+    return df
+
+
+def load_insights_teams(*, repo_root: Path, season: str) -> pd.DataFrame:
+    """Load and filter Insights `teams.csv` using `ESSENTIAL_TEAM_STATS`."""
+
+    paths = DataPaths(repo_root=repo_root)
+    path = paths.insights_data_root / season / "teams.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing Insights teams.csv at: {path}")
+
+    df = pd.read_csv(path)
+    if df.empty:
+        return df
+
+    df = select_insights_columns(
+        df,
+        keep=ESSENTIAL_TEAM_STATS,
+        always_keep=("id", "code"),
+        drop=DROP_COLUMNS,
+        context=f"teams.csv ({season})",
+    )
+    return df
+
+
+def load_insights_player_match_stats(
+    *, repo_root: Path, season: str, include_optional: bool = False
+) -> pd.DataFrame:
+    """Load and filter Insights match-level player stats, if present.
+
+    The exact file path varies by season/export. This loader searches a few common
+    locations under `FPL-Core-Insights/data/<season>/`.
+    """
+
+    paths = DataPaths(repo_root=repo_root)
+    base = paths.insights_data_root / season
+
+    candidates = [
+        base / "player_match_stats.csv",
+        base / "player_match_stats" / "player_match_stats.csv",
+        base / "playermatchstats" / "player_match_stats.csv",
+        base / "playermatchstats" / "player_match_stats" / "player_match_stats.csv",
+    ]
+    path = next((p for p in candidates if p.exists()), None)
+    if path is None:
+        raise FileNotFoundError(
+            "Could not find player_match_stats.csv under Insights season folder. "
+            f"Looked in: {', '.join(str(p) for p in candidates)}"
+        )
+
+    df = pd.read_csv(path)
+    if df.empty:
+        return df
+
+    keep = list(ESSENTIAL_MATCH_STATS)
+    if include_optional:
+        keep += list(OPTIONAL_STATS)
+
+    df = select_insights_columns(
+        df,
+        keep=keep,
+        always_keep=("player_id", "match_id"),
+        drop=DROP_COLUMNS,
+        context=f"player_match_stats.csv ({season})",
+    )
+    return df
+
+
 def _extract_gw_from_path(path: Path) -> int | None:
     # Matches .../GW12/... or ...\\GW12\\...
     match = re.search(r"(?:^|[\\/])GW(\d+)(?:[\\/]|$)", str(path))
@@ -130,7 +251,12 @@ def _extract_gw_from_path(path: Path) -> int | None:
 
 
 def load_premier_league_gameweek_stats(
-    *, repo_root: Path, season: str, apply_feature_engineering: bool = True
+    *, 
+    repo_root: Path, 
+    season: str, 
+    apply_feature_engineering: bool = True,
+    previous_season: str | None = None,
+    handle_new_players: bool = True,
 ) -> pd.DataFrame:
     """Load Premier League player_gameweek_stats.csv across all GW folders.
 
@@ -141,6 +267,8 @@ def load_premier_league_gameweek_stats(
         repo_root: Root directory of the repository
         season: Season identifier (e.g., "2025-2026")
         apply_feature_engineering: If True, apply all feature engineering transformations
+        previous_season: Previous season identifier (e.g., "2024-2025") for handling new players
+        handle_new_players: If True and previous_season provided, fill missing features for new players
         
     Returns:
         DataFrame with loaded data and optionally engineered features
@@ -204,9 +332,51 @@ def load_premier_league_gameweek_stats(
         # Metadata enrich is best-effort; core stats can still load without it.
         pass
 
+    # Attach team strength features from teams.csv (crucial for modeling)
+    try:
+        if "team_code" in all_df.columns or "team" in all_df.columns:
+            teams_path = paths.insights_data_root / season / "teams.csv"
+            if teams_path.exists():
+                teams = pd.read_csv(teams_path)
+                team_key = "code" if "code" in teams.columns else "team_code"
+                
+                if team_key in teams.columns:
+                    teams[team_key] = pd.to_numeric(teams[team_key], errors="coerce")
+                    teams = teams.dropna(subset=[team_key]).copy()
+                    teams[team_key] = teams[team_key].astype(int)
+                    
+                    # Select team strength columns
+                    strength_cols = [team_key]
+                    for col in [
+                        "strength_overall_home", "strength_overall_away",
+                        "strength_attack_home", "strength_attack_away",
+                        "strength_defence_home", "strength_defence_away",
+                        "elo",
+                    ]:
+                        if col in teams.columns:
+                            strength_cols.append(col)
+                    
+                    teams_subset = teams[strength_cols].drop_duplicates(subset=[team_key])
+                    
+                    # Merge on team_code (player's team)
+                    merge_key = "team_code" if "team_code" in all_df.columns else "team"
+                    all_df = all_df.merge(
+                        teams_subset,
+                        left_on=merge_key,
+                        right_on=team_key,
+                        how="left",
+                        suffixes=("", "_team"),
+                    )
+                    
+                    # Clean up duplicate key column if created
+                    if team_key != merge_key and team_key in all_df.columns:
+                        all_df = all_df.drop(columns=[team_key])
+    except Exception as exc:
+        print(f"Warning: failed to merge team strength features: {exc}")
+
     # Attach per-GW player availability/market signals from playerstats.csv (best-effort).
-    # This file includes chance_of_playing_* and selected_by_percent, which help avoid
-    # over-ranking likely-bench players.
+    # We intentionally avoid leaky columns (e.g., ep_next/ep_this) and keep this merge
+    # small to reduce mixed-type merge issues.
     try:
         stats_path = paths.insights_data_root / season / "playerstats.csv"
         if stats_path.exists():
@@ -221,19 +391,42 @@ def load_premier_league_gameweek_stats(
                 stats["player_id"] = stats["player_id"].astype(int)
                 stats["gw"] = stats["gw"] .astype(int)
 
-                # Only bring the availability/market signals needed for modeling.
-                # Keeping this small avoids mixed-type merge issues and keeps loading fast.
                 keep_cols = [
+                    # Identity
                     "player_id",
                     "gw",
+
+                    # Availability/market
                     "chance_of_playing_next_round",
                     "chance_of_playing_this_round",
                     "selected_by_percent",
-                    "ep_next",
-                    "ep_this",
+
+                    # Value + form
+                    "now_cost",
+                    "value_season",
+                    "form",
+
+                    # Set pieces (high-signal)
+                    "penalties_order",
+
+                    # Defensive (new rules)
+                    "defensive_contribution",
+                    "defensive_contribution_per_90",
+                    "tackles",
+                    "clearances_blocks_interceptions",
+                    "recoveries",
                 ]
-                keep_cols = [c for c in keep_cols if c in stats.columns]
-                stats = stats[keep_cols].drop_duplicates(subset=["player_id", "gw"], keep="last")
+
+                # Allow the UI/other consumers to opt into optional fields later; for training
+                # keep this lean and drop known bad/leaky columns.
+                stats = select_insights_columns(
+                    stats,
+                    keep=keep_cols,
+                    always_keep=("player_id", "gw"),
+                    drop=DROP_COLUMNS,
+                    context=f"playerstats.csv ({season})",
+                )
+                stats = stats.drop_duplicates(subset=["player_id", "gw"], keep="last")
 
                 all_df = all_df.merge(stats, on=["player_id", "gw"], how="left")
 
@@ -258,8 +451,15 @@ def load_premier_league_gameweek_stats(
                     "chance_of_playing_next_round",
                     "chance_of_playing_this_round",
                     "selected_by_percent",
-                    "ep_next",
-                    "ep_this",
+                    "now_cost",
+                    "value_season",
+                    "form",
+                    "penalties_order",
+                    "defensive_contribution",
+                    "defensive_contribution_per_90",
+                    "tackles",
+                    "clearances_blocks_interceptions",
+                    "recoveries",
                 ):
                     _coalesce(c)
     except Exception as exc:
@@ -290,10 +490,35 @@ def load_premier_league_gameweek_stats(
     for c in fixture_cols:
         if c not in all_df.columns:
             all_df[c] = pd.NA
+
+    # Safety: ensure leaky official prediction columns never flow into modeling.
+    for c in ("ep_next", "ep_this"):
+        if c in all_df.columns:
+            all_df = all_df.drop(columns=[c])
     
     # Apply feature engineering if requested
     if apply_feature_engineering:
-        all_df = engineer_all_features(all_df)
+        # Optionally load previous season for new player handling
+        previous_season_df = None
+        if handle_new_players and previous_season:
+            try:
+                print(f"Loading previous season ({previous_season}) for new player handling...")
+                previous_season_df = load_premier_league_gameweek_stats(
+                    repo_root=repo_root,
+                    season=previous_season,
+                    apply_feature_engineering=False,  # Don't recurse
+                    handle_new_players=False,
+                )
+                print(f"Loaded {len(previous_season_df)} records from {previous_season}")
+            except Exception as e:
+                print(f"Warning: Could not load previous season data: {e}")
+                print("New players will not have position-based priors applied")
+        
+        all_df = engineer_all_features(
+            all_df,
+            handle_new_players=handle_new_players and previous_season_df is not None,
+            previous_season_df=previous_season_df,
+        )
 
     return all_df
 

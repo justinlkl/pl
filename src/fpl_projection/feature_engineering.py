@@ -572,7 +572,12 @@ def calculate_cumulative_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
+def engineer_all_features(
+    df: pd.DataFrame,
+    *,
+    handle_new_players: bool = True,
+    previous_season_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Apply all feature engineering transformations.
     
     This is the complete pipeline:
@@ -608,6 +613,17 @@ def engineer_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = calculate_minutes_shrinkage(df)
     df = calculate_role_weighted_features(df)
     df = calculate_cumulative_features(df)
+    
+    # Handle new players (fill missing rolling/cumulative features with position priors)
+    if handle_new_players and previous_season_df is not None:
+        from .new_entities import handle_new_players_full_pipeline
+        
+        df = handle_new_players_full_pipeline(
+            df_current=df,
+            df_previous=previous_season_df,
+            player_id_col="player_id",
+            position_col="position",
+        )
     
     return df
 

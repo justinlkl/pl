@@ -17,8 +17,6 @@ CORE_PREDICTORS: list[str] = [
     "chance_of_playing_next_round",
     "chance_of_playing_this_round",
     "selected_by_percent",
-    "ep_next",
-    "ep_this",
 
     # Price/value context
     "now_cost",
@@ -56,6 +54,9 @@ CORE_PREDICTORS: list[str] = [
     "creativity",
     "threat",
     "form",
+
+    # Set pieces (high-signal)
+    "penalties_order",
 
     # Attacking context embeddings (engineered proxies)
     "xthreat_embed",
