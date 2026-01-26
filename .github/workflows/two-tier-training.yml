@@ -91,12 +91,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Stage updated model, preprocessor, and projections
-          git add \
+          # Stage only files that actually exist to avoid fatal pathspec errors
+          for f in \
             artifacts/model.keras \
             artifacts/preprocess.joblib \
             outputs/projections.csv \
-            outputs/projections_internal.csv
+            outputs/projections_internal.csv; do
+            if [ -e "$f" ]; then
+              git add "$f"
+            else
+              echo "Not found (skipping): $f"
+            fi
+          done
 
           if git diff --cached --quiet; then
             echo "✓ No changes to commit"
@@ -115,6 +121,7 @@ jobs:
             outputs/projections.csv
             outputs/projections_internal.csv
             artifacts/model.keras
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Job summary
