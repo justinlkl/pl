@@ -1,0 +1,128 @@
+name: Two-Tier Training (Weekly Fine-Tune)
+
+on:
+  # Run every Monday at 8 AM UTC for weekly fine-tuning
+  schedule:
+    - cron: '0 8 * * 1'
+  # Allow manual trigger
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: two-tier-training
+  cancel-in-progress: true
+
+env:
+  DATA_REPO_URL: https://github.com/olbauday/FPL-Core-Insights.git
+  DATA_BRANCH: main
+  PYTHON_VERSION: '3.13'
+
+jobs:
+  weekly-finetune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Sync FPL-Core-Insights dataset
+        run: |
+          set -e
+          echo "📥 Syncing FPL-Core-Insights..."
+
+          if [ -d "FPL-Core-Insights/.git" ]; then
+            echo "Found existing FPL-Core-Insights checkout; hard-resetting to origin/${DATA_BRANCH}"
+            git -C FPL-Core-Insights fetch --depth=1 origin ${DATA_BRANCH}
+            git -C FPL-Core-Insights reset --hard FETCH_HEAD
+          else
+            rm -rf FPL-Core-Insights
+            git clone --depth 1 --branch ${DATA_BRANCH} ${DATA_REPO_URL} FPL-Core-Insights
+          fi
+
+          echo "✓ Data synced"
+          echo "Latest data commit: $(git -C FPL-Core-Insights rev-parse --short HEAD)"
+          echo "CSV count: $(find FPL-Core-Insights/data -name '*.csv' | wc -l)"
+
+      - name: Run weekly fine-tuning
+        run: |
+          set -e
+          echo "🎯 Running weekly fine-tuning (LSTM model)..."
+          python -u scripts/11_weekly_finetune.py
+
+          echo "✓ Fine-tuning complete"
+          echo "Updated model: artifacts/model.keras"
+
+      - name: Generate projections
+        run: |
+          set -e
+          echo "📈 Generating updated projections..."
+          python -u -m src.fpl_projection.ensemble_predict
+
+          echo "✓ Projections generated"
+          echo "Output: outputs/projections.csv"
+
+      - name: Verify outputs
+        run: |
+          set -e
+          echo "✅ Output files created:"
+          ls -lh outputs/projections*.csv
+          echo ""
+          echo "Player count: $(tail -n +2 outputs/projections.csv | wc -l)"
+
+      - name: Commit and push results
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage updated model, preprocessor, and projections
+          git add \
+            artifacts/model.keras \
+            artifacts/preprocess.joblib \
+            outputs/projections.csv \
+            outputs/projections_internal.csv
+
+          if git diff --cached --quiet; then
+            echo "✓ No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "🔄 Weekly fine-tune: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git push
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-finetune-${{ github.run_id }}
+          path: |
+            outputs/projections.csv
+            outputs/projections_internal.csv
+            artifacts/model.keras
+          retention-days: 7
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Weekly Fine-Tune Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "**Model**: artifacts/model.keras" >> $GITHUB_STEP_SUMMARY
+          echo "**Projections**: outputs/projections.csv ($(tail -n +2 outputs/projections.csv 2>/dev/null | wc -l) players)" >> $GITHUB_STEP_SUMMARY
