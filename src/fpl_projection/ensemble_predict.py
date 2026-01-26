@@ -487,7 +487,31 @@ def main() -> None:
     print(f"[predict] Built windows for {len(X_list):,} players in {time.perf_counter() - t2:.1f}s")
 
     X = np.stack(X_list, axis=0)
-    X = transform_sequences(prep.pipeline, X)
+    # Transform sequences using stored pipeline; if the stored pipeline
+    # expects a different number of features (e.g., because we filtered
+    # leaky columns), fall back to fitting a new pipeline on the current
+    # sequence timesteps to ensure inference can proceed.
+    try:
+        X = transform_sequences(prep.pipeline, X)
+    except ValueError as exc:
+        msg = str(exc)
+        if "expecting" in msg or "n_features" in msg:
+            print(f"Warning: preprocess pipeline mismatch: {msg}")
+            try:
+                from .preprocessing import fit_preprocessor_on_timesteps
+
+                seq_n, seq_len, n_feat = X.shape
+                flat = X.reshape(seq_n * seq_len, n_feat)
+                print("Re-fitting preprocessing pipeline on current data (fallback)")
+                new_pipeline = fit_preprocessor_on_timesteps(flat)
+                X = transform_sequences(new_pipeline, X)
+                # Replace prep.pipeline so downstream code (role weights) uses same pipeline shape
+                prep.pipeline = new_pipeline
+            except Exception as exc2:
+                print(f"Failed to auto-refit preprocessing pipeline: {exc2}")
+                raise
+        else:
+            raise
 
     # Apply per-sample role weights
     uniq = sorted(set(roles))
