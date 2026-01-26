@@ -414,7 +414,23 @@ def main() -> None:
     raw = load_premier_league_gameweek_stats(repo_root=repo_root, season=args.season, apply_feature_engineering=True)
     feature_columns = _get_available_features(raw, DEFAULT_FEATURE_COLUMNS)
 
-    df = select_and_coerce_numeric(raw, prep.feature_columns, TARGET_COLUMN)
+    # Preprocessor may reference features that are not present in the
+    # currently-loaded raw dataset (e.g., historical runs where leaky
+    # columns like `ep_next` were present during training). Be defensive:
+    # prefer the intersection of preprocessor feature columns and available
+    # raw columns, but ensure the target column exists.
+    try:
+        df = select_and_coerce_numeric(raw, prep.feature_columns, TARGET_COLUMN)
+    except ValueError as exc:
+        msg = str(exc)
+        print(f"Warning: preprocessor expects features missing from raw data: {msg}")
+        avail = [c for c in prep.feature_columns if c in raw.columns]
+        if TARGET_COLUMN not in raw.columns:
+            raise
+        if not avail:
+            raise ValueError("No preprocessor feature columns are available in the raw data")
+        print(f"Using reduced feature set of {len(avail)} columns (intersection)")
+        df = select_and_coerce_numeric(raw, avail, TARGET_COLUMN)
 
     print(f"[predict] Data loaded in {time.perf_counter() - t1:.1f}s (rows={len(df):,})")
 
