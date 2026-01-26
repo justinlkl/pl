@@ -122,13 +122,20 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add \
+          # Stage only files that exist to avoid pathspec errors
+          for f in \
             artifacts/ensemble \
             outputs/projections.csv \
             outputs/projections_internal.csv \
             site/data/projections.json \
             site/projections.json \
-            artifacts/last_postgw_event.json
+            artifacts/last_postgw_event.json; do
+            if [ -e "$f" ]; then
+              git add "$f"
+            else
+              echo "Not found (skipping): $f"
+            fi
+          done
 
           if git diff --cached --quiet; then
             echo "✓ No changes to commit"
@@ -149,4 +156,5 @@ jobs:
             site/data/projections.json
             site/projections.json
             artifacts/last_postgw_event.json
+          if-no-files-found: warn
           retention-days: 14

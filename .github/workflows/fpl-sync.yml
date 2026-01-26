@@ -84,11 +84,18 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           # Commit only the generated artifacts that power your hosted site.
-          git add \
+          # Stage only existing output files
+          for f in \
             outputs/projections.csv \
             outputs/projections_internal.csv \
             site/data/projections.json \
-            site/projections.json
+            site/projections.json; do
+            if [ -e "$f" ]; then
+              git add "$f"
+            else
+              echo "Not found (skipping): $f"
+            fi
+          done
 
           if git diff --cached --quiet; then
             echo "✓ No changes to commit"
@@ -108,4 +115,5 @@ jobs:
             outputs/projections_internal.csv
             site/data/projections.json
             site/projections.json
+          if-no-files-found: warn
           retention-days: 14
