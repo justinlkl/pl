@@ -1,0 +1,17 @@
+{
+  "meta": {
+    "fitted_on": "test_window"
+  },
+  "overrides": {
+    "MID_AM": 1.06
+  },
+  "report": [
+    {
+      "count": 26,
+      "mae_after": 4.717439903416681,
+      "mae_before": 4.832165563839845,
+      "multiplier": 1.06,
+      "role": "MID_AM"
+    }
+  ]
+}
