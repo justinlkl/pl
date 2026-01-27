@@ -149,12 +149,26 @@ Endpoints:
 - Projections: refreshed in `outputs/projections*.csv` and `site/data/projections.json`.
 - Eval: GW23 vs actuals → MAE 0.988, RMSE 1.921 (see `reports/evaluation_summary.csv`).
 
+## Model Limitations
+
+- **No fixture simulation**: Model predicts from historical player/team patterns only; doesn't simulate future opponent difficulty explicitly (uses fixture_difficulty feature for context, not simulation).
+- **Variance**: Individual GW projections have high variance; best used for relative player ranking rather than absolute point predictions.
+- **Availability/rotation risk**: Does not model minutes/rotation risk; relies on historical minutes data and naive forward expectations.
+- **Transfer/injury bias**: New player priors use position averages only; doesn't account for transfer fee, playing style, or injury/suspension.
+
+## Future Enhancements
+
+- **Ensemble methods**: Stack LSTM with XGBoost/LightGBM and Poisson regression for refined variance estimates.
+- **Fixture difficulty integration**: Explicit per-GW fixture strength simulator aligned with team xG/xGC models.
+- **Transfer cost optimization**: Solver to maximize expected points subject to budget and squad constraints.
+- **Minutes/rotation modeling**: Probabilistic availability model to weight projections by bench risk.
+- **Market weighting**: Incorporate ownership and value metrics for EV-based ranking.
+
 ## Legacy / optional pieces
 
 - [main_fpl_model.R](main_fpl_model.R): legacy R draft, not used in the Python pipeline.
 - [streamlit_app.py](streamlit_app.py): deprecated in favor of the static site under `site/`.
 - [Dockerfile](Dockerfile) / [docker-compose.yml](docker-compose.yml): previously used for Streamlit; not maintained for the current static site flow.
-- [scripts/blend_weights.py](scripts/blend_weights.py): ad-hoc ensemble explorer; not invoked by the standard train/predict pipeline.
 - [scripts/fpl_gameweek_gate.py](scripts/fpl_gameweek_gate.py): CI gate helper for GitHub Actions; optional for local runs.
 
 ## Data setup
