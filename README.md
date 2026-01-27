@@ -65,6 +65,38 @@ Set-Location c:\Users\justinlam\Desktop\pl\site
 C:/Users/justinlam/Desktop/pl/.venv/Scripts/python.exe -m http.server 8000 --bind 127.0.0.1
 ```
 
+## Advanced features
+
+### Fixture difficulty integration
+Import [src/fpl_projection/fixture_features.py](src/fpl_projection/fixture_features.py) to add opponent strength signals:
+
+```python
+from src.fpl_projection.fixture_features import build_opponent_strength_table, add_fixture_features
+opponent_strength = build_opponent_strength_table(df=df, repo_root=Path('.'), season='2025-2026')
+df = add_fixture_features(df, opponent_strength)
+```
+
+This adds rolling opponent defensive metrics (GC, xGC, clean sheet rate) with home/away adjustments.
+
+### Ensemble stacking
+Use [src/fpl_projection/ensemble_stacker.py](src/fpl_projection/ensemble_stacker.py) to combine LSTM + XGBoost + Ridge:
+
+```python
+from src.fpl_projection.ensemble_stacker import EnsembleStacker
+stacker = EnsembleStacker()
+metrics = stacker.fit(X_train, y_train, lstm_model, X_val, y_val)
+predictions = stacker.predict(X_test, lstm_model)
+```
+
+### Uncertainty estimation
+Generate confidence bounds via [src/fpl_projection/uncertainty_estimation.py](src/fpl_projection/uncertainty_estimation.py):
+
+```python
+from src.fpl_projection.uncertainty_estimation import predict_with_uncertainty
+uncertainty = predict_with_uncertainty(model, X, n_simulations=100)
+# Returns: mean, std, lower_95, upper_95, lower_68, upper_68
+```
+
 ## Quickstart
 
 1) Install deps
@@ -156,13 +188,17 @@ Endpoints:
 - **Availability/rotation risk**: Does not model minutes/rotation risk; relies on historical minutes data and naive forward expectations.
 - **Transfer/injury bias**: New player priors use position averages only; doesn't account for transfer fee, playing style, or injury/suspension.
 
+## Recent Enhancements (added 2026-01-27)
+
+- ✅ **Fixture difficulty integration** ([fixture_features.py](src/fpl_projection/fixture_features.py)): Rolling opponent defensive metrics with home/away adjustments.
+- ✅ **Ensemble stacking** ([ensemble_stacker.py](src/fpl_projection/ensemble_stacker.py)): LSTM + XGBoost + Ridge meta-learner for robust predictions.
+- ✅ **Uncertainty estimation** ([uncertainty_estimation.py](src/fpl_projection/uncertainty_estimation.py)): Monte Carlo dropout & bootstrap confidence intervals.
+
 ## Future Enhancements
 
-- **Ensemble methods**: Stack LSTM with XGBoost/LightGBM and Poisson regression for refined variance estimates.
-- **Fixture difficulty integration**: Explicit per-GW fixture strength simulator aligned with team xG/xGC models.
-- **Transfer cost optimization**: Solver to maximize expected points subject to budget and squad constraints.
-- **Minutes/rotation modeling**: Probabilistic availability model to weight projections by bench risk.
-- **Market weighting**: Incorporate ownership and value metrics for EV-based ranking.
+- Probabilistic minutes/rotation modeling to weight projections by bench risk.
+- Incorporate ownership and value metrics for EV-based ranking.
+- Transfer cost optimization solver (maximize expected points subject to budget/constraints).
 
 ## Legacy / optional pieces
 

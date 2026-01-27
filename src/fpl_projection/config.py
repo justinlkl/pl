@@ -5,6 +5,11 @@ from __future__ import annotations
 This repository uses the FPL-Core-Insights `player_gameweek_stats.csv` schema.
 The recommended feature set below is mapped to the column names that actually
 exist in that dataset.
+
+Advanced features available:
+  - fixture_features.py: Opponent defensive strength with rolling averages
+  - ensemble_stacker.py: LSTM + XGBoost + Ridge meta-learner
+  - uncertainty_estimation.py: Confidence intervals via Monte Carlo dropout
 """
 
 # ============================================================================
