@@ -1,0 +1,287 @@
+{
+  "meta": {
+    "generated_at": "2026-01-27T17:20:38.163608",
+    "gameweeks": [
+      24,
+      25,
+      26,
+      27,
+      28,
+      29
+    ]
+  },
+  "top_5": {
+    "GW24": [
+      {
+        "player_id": 64,
+        "web_name": "Watkins",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 5.002399635314942
+      },
+      {
+        "player_id": 624,
+        "web_name": "Bowen",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.298461151123047
+      },
+      {
+        "player_id": 120,
+        "web_name": "Schade",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 4.031519279479981
+      },
+      {
+        "player_id": 47,
+        "web_name": "Rogers",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.944170761108399
+      },
+      {
+        "player_id": 97,
+        "web_name": "Evanilson",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 3.89238600730896
+      }
+    ],
+    "GW25": [
+      {
+        "player_id": 64,
+        "web_name": "Watkins",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.992242288589478
+      },
+      {
+        "player_id": 624,
+        "web_name": "Bowen",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.397200894355774
+      },
+      {
+        "player_id": 120,
+        "web_name": "Schade",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 4.062736587524414
+      },
+      {
+        "player_id": 47,
+        "web_name": "Rogers",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 4.061191377639771
+      },
+      {
+        "player_id": 97,
+        "web_name": "Evanilson",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 3.912475156784058
+      }
+    ],
+    "GW26": [
+      {
+        "player_id": 64,
+        "web_name": "Watkins",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.82982177734375
+      },
+      {
+        "player_id": 624,
+        "web_name": "Bowen",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.096141648292542
+      },
+      {
+        "player_id": 136,
+        "web_name": "Thiago",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 3.816135096549988
+      },
+      {
+        "player_id": 120,
+        "web_name": "Schade",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.784437875747681
+      },
+      {
+        "player_id": 47,
+        "web_name": "Rogers",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.773912372589112
+      }
+    ],
+    "GW27": [
+      {
+        "player_id": 64,
+        "web_name": "Watkins",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.796088266372681
+      },
+      {
+        "player_id": 624,
+        "web_name": "Bowen",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.280086660385132
+      },
+      {
+        "player_id": 47,
+        "web_name": "Rogers",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.9925687122344975
+      },
+      {
+        "player_id": 120,
+        "web_name": "Schade",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.9792880439758314
+      },
+      {
+        "player_id": 97,
+        "web_name": "Evanilson",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 3.78980519771576
+      }
+    ],
+    "GW28": [
+      {
+        "player_id": 64,
+        "web_name": "Watkins",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.621401309967041
+      },
+      {
+        "player_id": 624,
+        "web_name": "Bowen",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.16557457447052
+      },
+      {
+        "player_id": 47,
+        "web_name": "Rogers",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.964235315322876
+      },
+      {
+        "player_id": 120,
+        "web_name": "Schade",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.887623701095581
+      },
+      {
+        "player_id": 387,
+        "web_name": "Szoboszlai",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 3.7280005073547366
+      }
+    ],
+    "GW29": [
+      {
+        "player_id": 64,
+        "web_name": "Watkins",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.652642297744752
+      },
+      {
+        "player_id": 624,
+        "web_name": "Bowen",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 4.298517274856568
+      },
+      {
+        "player_id": 47,
+        "web_name": "Rogers",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 4.024464511871338
+      },
+      {
+        "player_id": 120,
+        "web_name": "Schade",
+        "position": "Midfielder",
+        "role": "MID_AM",
+        "projection": 4.004255504608155
+      },
+      {
+        "player_id": 97,
+        "web_name": "Evanilson",
+        "position": "Forward",
+        "role": "FWD",
+        "projection": 3.872544169425965
+      }
+    ]
+  },
+  "stats": {
+    "GW24": {
+      "mean_projection": 1.0827356695684012,
+      "median_projection": 0.6159056997299195,
+      "std_projection": 1.1906964995276457,
+      "min_projection": -0.0577742665062976,
+      "max_projection": 5.002399635314942,
+      "mean_uncertainty": 0.16433929089756721
+    },
+    "GW25": {
+      "mean_projection": 1.116697907755717,
+      "median_projection": 0.6408100748062134,
+      "std_projection": 1.2167742419222332,
+      "min_projection": -0.0753580544888973,
+      "max_projection": 4.992242288589478,
+      "mean_uncertainty": 0.1673840108809219
+    },
+    "GW26": {
+      "mean_projection": 1.0788973949537364,
+      "median_projection": 0.6922206902503968,
+      "std_projection": 1.1346304049540274,
+      "min_projection": -0.0463619636583931,
+      "max_projection": 4.82982177734375,
+      "mean_uncertainty": 0.15831000057938538
+    },
+    "GW27": {
+      "mean_projection": 1.1221186820290872,
+      "median_projection": 0.7219090032577515,
+      "std_projection": 1.2026931652403738,
+      "min_projection": -0.0634280510152442,
+      "max_projection": 4.796088266372681,
+      "mean_uncertainty": 0.15434156793725992
+    },
+    "GW28": {
+      "mean_projection": 1.140364640091775,
+      "median_projection": 0.7884775257110597,
+      "std_projection": 1.1995423476908038,
+      "min_projection": -0.1094081082298785,
+      "max_projection": 4.621401309967041,
+      "mean_uncertainty": 0.1678960003546735
+    },
+    "GW29": {
+      "mean_projection": 1.1692100131838556,
+      "median_projection": 0.7775901174545289,
+      "std_projection": 1.2228642736376896,
+      "min_projection": -0.0652020661231083,
+      "max_projection": 4.652642297744752,
+      "mean_uncertainty": 0.1670644893239437
+    }
+  }
+}

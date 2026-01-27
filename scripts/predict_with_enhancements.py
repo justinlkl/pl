@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.fpl_projection.config import DEFAULT_FEATURE_COLUMNS, DEFAULT_HORIZON, DEFAULT_SEQ_LENGTH, TARGET_COLUMN
 from src.fpl_projection.data_loading import load_premier_league_gameweek_stats
 from src.fpl_projection.preprocessing import PreprocessArtifacts, select_and_coerce_numeric, transform_sequences
-from src.fpl_projection.fixture_features import build_opponent_strength_table, add_fixture_features
+from src.fpl_projection.fixture_features import integrate_fixture_features
+from src.fpl_projection.form_features import integrate_form_features
 from src.fpl_projection.ensemble_stacker import EnsembleStacker
 from src.fpl_projection.uncertainty_estimation import predict_with_uncertainty
 from src.fpl_projection.role_modeling import (
@@ -49,6 +50,7 @@ def main() -> int:
     parser.add_argument("--use-ensemble", action="store_true", help="Use ensemble stacking if available")
     parser.add_argument("--uncertainty-simulations", type=int, default=50, help="Monte Carlo simulations for uncertainty")
     parser.add_argument("--with-fixture-features", action="store_true", help="Include fixture difficulty features")
+    parser.add_argument("--with-form-features", action="store_true", help="Include form trend features")
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root)
@@ -71,19 +73,34 @@ def main() -> int:
 
     # Add fixture features
     if args.with_fixture_features:
-        print(f"\n[2/6] Building fixture difficulty features...")
+        print(f"\n[2a/6] Building fixture difficulty features...")
         try:
-            opponent_strength = build_opponent_strength_table(
+            raw = integrate_fixture_features(
                 df=raw,
                 repo_root=repo_root,
                 season=args.season,
+                graceful_fallback=True,
             )
-            raw = add_fixture_features(raw, opponent_strength)
-            print(f"  ✅ Added opponent strength metrics")
+            print(f"  ✅ Fixture features integrated")
         except Exception as e:
             print(f"  ⚠️  Fixture features failed (continuing without): {e}")
     else:
-        print(f"\n[2/6] Skipping fixture features (use --with-fixture-features to enable)")
+        print(f"\n[2a/6] Skipping fixture features (use --with-fixture-features to enable)")
+
+    # Add form features
+    if args.with_form_features:
+        print(f"\n[2b/6] Building form trend features...")
+        try:
+            raw = integrate_form_features(
+                df=raw,
+                rolling_windows=[3, 5],
+                metrics=['total_points'],
+            )
+            print(f"  ✅ Form features integrated (rolling windows: 3, 5)")
+        except Exception as e:
+            print(f"  ⚠️  Form features failed (continuing without): {e}")
+    else:
+        print(f"\n[2b/6] Skipping form features (use --with-form-features to enable)")
 
     # Load model and preprocessor
     print(f"\n[3/6] Loading LSTM model and preprocessor...")
