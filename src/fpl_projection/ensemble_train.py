@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import json
 
 from .config import DEFAULT_FEATURE_COLUMNS, DEFAULT_HORIZON, DEFAULT_SEQ_LENGTH, TARGET_COLUMN
 from .data_loading import load_premier_league_gameweek_stats
@@ -171,6 +172,12 @@ def main() -> None:
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
     parser.add_argument("--folds", type=int, default=5)
 
+    # Fine-tuning options: train a short sliding-window fine-tune pass
+    parser.add_argument("--fine-tune", action="store_true", help="Run an additional fine-tuning pass on the last N GWs after base training.")
+    parser.add_argument("--fine-tune-gws", type=int, default=3, help="Number of recent gameweeks to use for fine-tuning (sliding window).")
+    parser.add_argument("--fine-tune-epochs", type=int, default=10, help="Epochs to run during fine-tuning.")
+    parser.add_argument("--fine-tune-lr", type=float, default=0.1, help="Learning rate to use during fine-tuning.")
+
     parser.add_argument(
         "--lstm-only",
         action="store_true",
@@ -213,6 +220,11 @@ def main() -> None:
         from sklearn.linear_model import Ridge
         from sklearn.model_selection import KFold
         import joblib
+        # Optional LightGBM support (best-effort)
+        try:
+            from lightgbm import LGBMRegressor  # type: ignore
+        except Exception:
+            LGBMRegressor = None  # type: ignore
 
     _set_seed(args.seed)
 
@@ -400,6 +412,50 @@ def main() -> None:
         verbose=1,
     )
 
+    # Optional fine-tuning pass on most recent GWs (short sliding window)
+    if bool(args.fine_tune):
+        try:
+            last_gw = int(dataset.end_gw.max())
+            ft_min_end = last_gw - int(args.fine_tune_gws)
+            # Select sequences whose end_gw > ft_min_end (recent window)
+            mask = dataset.end_gw > ft_min_end
+            if mask.sum() >= 50:
+                X_ft = transform_sequences(pipeline, dataset.X[mask])
+                X_ft = _apply_role_weights(
+                    X_ft, np.asarray([roles_for_seq[i] for i in range(len(roles_for_seq)) if mask[i]])
+                )
+                y_ft = dataset.y[mask]
+
+                # sample_weight for fine-tune if we used role-weighted loss during base training
+                sw_ft = None
+                if sw_train is not None:
+                    try:
+                        sw_ft = sw_train[mask]
+                    except Exception:
+                        sw_ft = None
+
+                print(
+                    f"Running fine-tune on last {args.fine_tune_gws} GWs: {int(mask.sum())} samples, epochs={args.fine_tune_epochs}, lr={args.fine_tune_lr}"
+                )
+
+                # Update optimizer learning rate in-place to avoid recompiling (keeps custom losses/metrics intact)
+                try:
+                    if hasattr(lstm, "optimizer") and hasattr(lstm.optimizer, "learning_rate"):
+                        lstm.optimizer.learning_rate.assign(float(args.fine_tune_lr))
+                except Exception:
+                    # fallback to recompile if assign not available
+                    lstm.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=float(args.fine_tune_lr)), loss=lstm.loss, metrics=lstm.metrics)
+
+                fit_kwargs = {"epochs": int(args.fine_tune_epochs), "batch_size": int(args.batch_size), "verbose": 1}
+                if sw_ft is not None:
+                    fit_kwargs["sample_weight"] = sw_ft
+
+                lstm.fit(X_ft, y_ft, **fit_kwargs)
+            else:
+                print(f"Skipping fine-tune: not enough recent samples ({int(mask.sum())})")
+        except Exception as exc:
+            print(f"Warning: fine-tune failed: {exc}")
+
     # Evaluate LSTM on the held-out test window.
     X_test_pred = X_test
     y_test_true = test_ds.y
@@ -422,7 +478,37 @@ def main() -> None:
 
     print("Saving LSTM artifacts...")
     (out_dir / "lstm_model.keras").parent.mkdir(parents=True, exist_ok=True)
-    lstm.save(str(out_dir / "lstm_model.keras"))
+    try:
+        lstm.save(str(out_dir / "lstm_model.keras"))
+    except Exception as exc:
+        print(f"Warning: full model save failed ({exc}); saving weights + metadata instead.")
+        weights_file = out_dir / "lstm_model_weights.h5"
+        lstm.save_weights(str(weights_file))
+        meta = {
+            "weights_file": str(weights_file.name),
+            "seq_length": int(args.seq_length),
+            "num_features": int(n_features),
+            "horizon": int(args.horizon),
+            "optimizer": getattr(getattr(lstm, "optimizer", None), "__class__", type(None)).__name__ if getattr(lstm, "optimizer", None) is not None else None,
+            "optimizer_config": None,
+            "loss": None,
+            "metrics": None,
+        }
+        try:
+            if getattr(lstm, "optimizer", None) is not None:
+                meta["optimizer_config"] = lstm.optimizer.get_config()
+        except Exception:
+            meta["optimizer_config"] = None
+        try:
+            meta["loss"] = getattr(lstm.loss, "__name__", str(lstm.loss))
+        except Exception:
+            meta["loss"] = str(lstm.loss)
+        try:
+            meta["metrics"] = [getattr(m, "__name__", str(m)) for m in lstm.metrics]
+        except Exception:
+            meta["metrics"] = str(lstm.metrics)
+        (out_dir / "lstm_metadata.json").write_text(json.dumps(meta, indent=2))
+
     PreprocessArtifacts(feature_columns=feature_columns, pipeline=pipeline).save(str(out_dir / "preprocess.joblib"))
 
     if args.lstm_only:
@@ -497,6 +583,8 @@ def main() -> None:
     # Collect test predictions per horizon so we can evaluate the ensemble end-to-end.
     ensemble_pred_test = np.zeros((len(test_tab), args.horizon), dtype=float)
     ensemble_true_test = np.zeros((len(test_tab), args.horizon), dtype=float)
+    # Also collect ensemble predictions for all rows so we can export latest projections.
+    ensemble_pred_all = np.zeros((len(tab), args.horizon), dtype=float)
 
     for h in range(1, args.horizon + 1):
         target_col = f"target_h{h}"
@@ -516,6 +604,8 @@ def main() -> None:
         ]
         data_h = data_h_all[keep_cols].copy()
         data_h_test = data_h_test[keep_cols].copy()
+        # Full dataset for exporting projections (train+val+test)
+        data_all_full = tab[keep_cols].copy()
 
         # Boost LSTM influence in the stacker by scaling the LSTM prediction feature.
         data_h[f"lstm_pred_h{h}"] = pd.to_numeric(data_h[f"lstm_pred_h{h}"], errors="coerce") * float(args.lstm_pred_scale)
@@ -552,10 +642,14 @@ def main() -> None:
             preds_h.to_csv(out_dir / f"train_preds_h{h}.csv", index=False)
 
             preds_test_h = predict_model(final, data=data_h_test)
+            preds_all_h = predict_model(final, data=data_all_full)
             if "prediction_label" not in preds_test_h.columns:
                 raise ValueError("PyCaret prediction output missing 'prediction_label' column")
             ensemble_pred_test[:, h - 1] = (
                 pd.to_numeric(preds_test_h["prediction_label"], errors="coerce").to_numpy(dtype=float)
+            )
+            ensemble_pred_all[:, h - 1] = (
+                pd.to_numeric(preds_all_h["prediction_label"], errors="coerce").to_numpy(dtype=float)
             )
             ensemble_true_test[:, h - 1] = pd.to_numeric(data_h_test[target_col], errors="coerce").to_numpy(dtype=float)
 
@@ -575,6 +669,12 @@ def main() -> None:
                 ("hgb", HistGradientBoostingRegressor(random_state=args.seed)),
                 ("etr", ExtraTreesRegressor(n_estimators=300, random_state=args.seed, n_jobs=-1)),
             ]
+            # Include LightGBM if available for faster tree diversity
+            if 'LGBMRegressor' in globals() and LGBMRegressor is not None:
+                try:
+                    base.insert(0, ("lgbm", LGBMRegressor(n_estimators=500, random_state=args.seed, n_jobs=-1)))
+                except Exception:
+                    pass
             model = StackingRegressor(
                 estimators=base,
                 final_estimator=Ridge(alpha=1.0, random_state=args.seed),
@@ -588,6 +688,11 @@ def main() -> None:
             pred_te = model.predict(Xte)
             ensemble_pred_test[:, h - 1] = np.asarray(pred_te, dtype=float)
             ensemble_true_test[:, h - 1] = np.asarray(yte, dtype=float)
+
+            # Predict for all rows (train+val+test) so we can export projections
+            Xall = data_all_full[feature_cols].to_numpy(dtype=float)
+            pred_all = model.predict(Xall)
+            ensemble_pred_all[:, h - 1] = np.asarray(pred_all, dtype=float)
 
     # Evaluate the ensemble on the held-out test window at player-level.
     metrics_ens, calib_ens, per_role_ens = evaluate_fpl_model(
@@ -637,6 +742,34 @@ def main() -> None:
         per_role_ens.to_csv(diag_dir / "per_role_ENSEMBLE.csv", index=False)
 
     print(f"\nSaved stacked models to: {out_dir}")
+
+    # Export per-player projections (ensemble) for the most recent end_gw rows
+    try:
+        proj_out = Path("outputs")
+        proj_out.mkdir(parents=True, exist_ok=True)
+        # Attach ensemble predictions back onto `tab` (same ordering)
+        for k in range(args.horizon):
+            tab[f"ensemble_pred_h{k+1}"] = ensemble_pred_all[:, k]
+
+        # Create a slim projections file: one row per (player_id, end_gw)
+        candidate_cols = ["player_id", "web_name", "team", "team_code", "club", "club_name"]
+        cols_keep = [c for c in candidate_cols if c in tab.columns]
+        # ensure end_gw is present
+        if "end_gw" not in cols_keep:
+            cols_keep.append("end_gw")
+        # always include player_id
+        if "player_id" not in cols_keep:
+            cols_keep.insert(0, "player_id")
+        for k in range(args.horizon):
+            cols_keep.append(f"ensemble_pred_h{k+1}")
+
+        projections_export = tab.loc[:, cols_keep].copy()
+        projections_export = projections_export.sort_values(["end_gw", "player_id"]).reset_index(drop=True)
+        out_path = proj_out / "projections_ensemble.csv"
+        projections_export.to_csv(out_path, index=False)
+        print(f"Wrote ensemble projections to: {out_path}")
+    except Exception as exc:
+        print(f"Warning: failed to export ensemble projections: {exc}")
 
 
 if __name__ == "__main__":

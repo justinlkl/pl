@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  app:
+    build:
+      context: .
+      args:
+        # Set to "1" to install ensemble extras (lightgbm, pycaret deps)
+        BUILD_ENSEMBLE: "1"
+    volumes:
+      - ./:/app:cached
+    working_dir: /app
+    tty: true
+    stdin_open: true
+    command: bash
