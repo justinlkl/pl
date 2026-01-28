@@ -19,6 +19,11 @@ env:
   DATA_REPO_URL: https://github.com/olbauday/FPL-Core-Insights.git
   DATA_BRANCH: main
   PYTHON_VERSION: '3.10'
+  SEASON: '2025-2026'
+  TARGET: 'xp_blend'
+  EPOCHS: '20'
+  EARLY_STOPPING_PATIENCE: '8'
+  LR_PLATEAU_PATIENCE: '4'
 
 jobs:
   sync-and-run:
@@ -60,11 +65,32 @@ jobs:
           echo "Latest data commit: $(git -C FPL-Core-Insights rev-parse --short HEAD)"
           echo "CSV count: $(find FPL-Core-Insights/data -name '*.csv' | wc -l)"
 
+      - name: Ensure ensemble artifacts exist (train if missing)
+        run: |
+          set -e
+          if [ -f "artifacts/ensemble/lstm_model.keras" ]; then
+            echo "✓ Found artifacts/ensemble/lstm_model.keras; skipping training"
+            exit 0
+          fi
+
+          echo "🧠 Missing artifacts/ensemble/lstm_model.keras; training ensemble..."
+          python -u -m src.fpl_projection.ensemble_train \
+            --season "${SEASON}" \
+            --target "${TARGET}" \
+            --mid-split \
+            --backend sklearn \
+            --epochs ${EPOCHS} \
+            --early-stopping-patience ${EARLY_STOPPING_PATIENCE} \
+            --lr-plateau-patience ${LR_PLATEAU_PATIENCE} \
+            --artifacts-dir artifacts \
+            --out-dir artifacts/ensemble
+
       - name: Run projection model
         run: |
           set -e
           echo "🤖 Generating projections (ensemble_predict)..."
           python -u -m src.fpl_projection.ensemble_predict \
+            --season "${SEASON}" \
             --ensemble-dir artifacts/ensemble \
             --mid-split \
             --backend sklearn

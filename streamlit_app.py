@@ -1,80 +1,133 @@
+"""Streamlit app for FPL Team Builder and Projections.
+
+This replaces the previous app with a simpler, tabbed interface that:
+- loads projections from `outputs/projections.csv` (or `data/projections.csv` fallback)
+- loads fixtures from `data/fixtures.json` (if present)
+- pulls picks from the public FPL entry API for a given `ENTRY_ID`
+
+Features: My Team (pulls picks), Projections, Fixtures Ticker, Key Stats table,
+Player Profile, Transfer Planner.
 """
-Streamlit app for FPL Team Builder and Projections.
-"""
+
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Callable
-from io import StringIO
-import os
+
 import base64
 import json
-import math
 import re
-import time
 from collections import Counter
 
 import pandas as pd
-import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-
-def get_with_retry(url: str, *, tries: int = 3, backoff: float = 1.5, timeout: int = 20) -> requests.Response:
-    """requests.get with simple retry/backoff for FPL endpoints."""
-    last_err: Exception | None = None
-    for i in range(int(tries)):
-        try:
-            r = requests.get(url, timeout=timeout)
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            last_err = e
-            if i >= int(tries) - 1:
-                raise
-            time.sleep(backoff ** i)
-    raise last_err  # pragma: no cover
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
 
 def get_player_photo_url(player_id: int) -> str:
     """Official Premier League CDN player photo (best-effort)."""
     return f"https://resources.premierleague.com/premierleague/photos/players/110x140/p{int(player_id)}.png"
 
+
 def get_team_badge_url(team_code: int) -> str:
     """Official Premier League CDN team badge (best-effort)."""
     return f"https://resources.premierleague.com/premierleague/badges/t{int(team_code)}.png"
+
 
 def get_shirt_url(team_code: int) -> str:
     """FPL kit image (best-effort)."""
     return f"https://fantasy.premierleague.com/dist/img/shirts/standard/shirt_{int(team_code)}-110.png"
 
-# ============================================================================
-# CONFIG
-# ============================================================================
+
+STAT_GLOSSARY: dict[str, str] = {
+    "£M": "Price in £m",
+    "App": "Appearances / starts proxy (starts)",
+    "Mins": "Minutes played",
+    "S": "Starts",
+    "OT": "Shots on Target",
+    "In": "Influence",
+    "BC": "Big Chances",
+    "xG": "Expected Goals",
+    "G": "Goals Scored",
+    "%xGI": "% share of team expected goal involvements (if available)",
+    "%GI": "% share of team goal involvements (if available)",
+    "xGI": "Expected Goal Involvements (xG + xA)",
+    "GI": "Goal Involvements (Goals + Assists)",
+    "KP": "Key Passes / Chances Created",
+    "BCC": "Big Chances Created",
+    "xA": "Expected Assists",
+    "A": "Assists",
+    "DC": "Defensive Contributions (actions counted by FPL)",
+    "xPts": "Projected points (sum across projected GWs)",
+    "P10": "10th percentile projected points (if available)",
+    "P50": "Median projected points (if available)",
+    "P90": "90th percentile projected points (if available)",
+    "BPS": "Bonus Points System score",
+    "B": "Bonus points",
+    "Pts": "Actual FPL points (historical)",
+    "Min%": "Chance of playing (minutes probability)",
+}
+
+
+STAT_FULL_NAMES: dict[str, str] = {
+    "Name": "Name",
+    "Club": "Club",
+    "£M": "Price (£m)",
+    "App": "Appearances",
+    "Mins": "Minutes",
+    "S": "Starts",
+    "OT": "Shots on Target",
+    "In": "Influence",
+    "BC": "Big Chances",
+    "xG": "Expected Goals",
+    "G": "Goals",
+    "%xGI": "% Team xGI",
+    "%GI": "% Team GI",
+    "xGI": "Expected Goal Involvements",
+    "GI": "Goal Involvements",
+    "KP": "Key Passes",
+    "BCC": "Big Chances Created",
+    "xA": "Expected Assists",
+    "A": "Assists",
+    "DC": "Defensive Contributions",
+    "xPts": "Projected Points",
+    "P10": "P10 Projected Points",
+    "P50": "P50 Projected Points",
+    "P90": "P90 Projected Points",
+    "BPS": "BPS",
+    "B": "Bonus",
+    "Pts": "Points",
+    "Min%": "Minutes %",
+}
+
 
 DATA = Path("data")
 OUTPUTS = Path("outputs")
-INSIGHTS_ROOT = Path("FPL-Core-Insights/data")
+
+INSIGHTS_ROOT = Path("FPL-Core-Insights") / "data"
 DEFAULT_INSIGHTS_SEASON = "2025-2026"
-INSIGHTS_PLAYERSTATS = INSIGHTS_ROOT / DEFAULT_INSIGHTS_SEASON / "playerstats.csv"
 
 PROJ_JSON = DATA / "projections.json"
 PROJ_CSV_FALLBACK = DATA / "projections.csv"
 PROJ_CSV = OUTPUTS / "projections.csv"
 PROJ_CSV_INTERNAL = OUTPUTS / "projections_internal.csv"
-FIXTURES_JSON = DATA / "fixtures.json"
-FIXTURES_URL = "https://fantasy.premierleague.com/api/fixtures/"
-LIVEFPL_PRICES_URL = "https://www.livefpl.net/prices"
 
+FIXTURES_JSON = DATA / "fixtures.json"
+
+# Optional BYO stats hooks
+STATS_CSV = DATA / "stats.csv"
+OPTA_CSV = DATA / "opta_stats.csv"
+OPTA_EXAMPLE_CSV = DATA / "opta_stats.example.csv"
+
+# Config
 ENTRY_ID = 1093603
 GW = 20
 BUDGET = 100.0
 MAX_PER_CLUB = 3
 POS_CAP = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
 
-ALLOWED_FORMATIONS = {
+# Allowed formations for Starting XI (GK is always 1)
+ALLOWED_FORMATIONS: dict[str, tuple[int, int, int, int]] = {
     "3-4-3": (1, 3, 4, 3),
     "3-5-2": (1, 3, 5, 2),
     "4-5-1": (1, 4, 5, 1),
@@ -84,245 +137,247 @@ ALLOWED_FORMATIONS = {
     "5-4-1": (1, 5, 4, 1),
 }
 
-# ============================================================================
-# DATA LOADING
-# ============================================================================
 
 @st.cache_data
 def load_json(path_or_url: str | Path) -> pd.DataFrame:
-    """Load JSON from file or URL."""
     p = str(path_or_url)
     if p.startswith("http"):
-        r = get_with_retry(p, timeout=20)
+        r = requests.get(p, timeout=20)
+        r.raise_for_status()
         payload = r.json()
-        if isinstance(payload, dict) and "fixtures" in payload:
+        if isinstance(payload, dict) and "fixtures" in payload and isinstance(payload["fixtures"], list):
             return pd.DataFrame(payload["fixtures"])
-        if isinstance(payload, dict) and "teams" in payload:
+        if isinstance(payload, dict) and "teams" in payload and isinstance(payload["teams"], list):
             return pd.DataFrame(payload["teams"])
         return pd.DataFrame(payload)
-    
+
     try:
         with open(p, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
-        if isinstance(payload, dict) and "fixtures" in payload:
+        if isinstance(payload, dict) and "fixtures" in payload and isinstance(payload["fixtures"], list):
             return pd.DataFrame(payload["fixtures"])
-        if isinstance(payload, dict) and "teams" in payload:
+        if isinstance(payload, dict) and "teams" in payload and isinstance(payload["teams"], list):
             return pd.DataFrame(payload["teams"])
         return pd.DataFrame(payload)
     except Exception:
         return pd.DataFrame()
 
+
 @st.cache_data
 def load_csv(path: Path) -> pd.DataFrame:
-    """Load CSV."""
     try:
         return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
 
+
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out.columns = [
+        str(c).strip().lower().replace(" ", "_").replace("%", "pct").replace("-", "_")
+        for c in out.columns
+    ]
+    return out
+
+
+@st.cache_data
+def load_opta_stats() -> pd.DataFrame:
+    """Load Opta-style advanced stats from data/opta_stats.csv.
+
+    This is a BYO dataset hook (no external Opta API/scraping). Expected identifiers:
+    - player_id (FPL element id) preferred, OR
+    - (web_name + team) as a fallback.
+    """
+    if not OPTA_CSV.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(OPTA_CSV)
+        df = _normalize_cols(df)
+
+        # Harmonize common id/name columns
+        if "element" in df.columns and "player_id" not in df.columns:
+            df = df.rename(columns={"element": "player_id"})
+        if "id" in df.columns and "player_id" not in df.columns:
+            df = df.rename(columns={"id": "player_id"})
+        if "name" in df.columns and "web_name" not in df.columns:
+            df = df.rename(columns={"name": "web_name"})
+        if "club" in df.columns and "team" not in df.columns:
+            df = df.rename(columns={"club": "team"})
+
+        if "player_id" in df.columns:
+            df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+        if "web_name" in df.columns:
+            df["web_name"] = df["web_name"].astype(str)
+        if "team" in df.columns:
+            df["team"] = df["team"].astype(str)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def enrich_with_opta_stats(projections: pd.DataFrame) -> pd.DataFrame:
+    """Merge Opta stats into projections if data/opta_stats.csv exists."""
+    if projections is None or projections.empty:
+        return projections
+    opta = load_opta_stats()
+    if opta.empty:
+        return projections
+
+    # Prefer exact join on FPL player_id
+    if "player_id" in projections.columns and "player_id" in opta.columns and opta["player_id"].notna().any():
+        return projections.merge(opta, on="player_id", how="left", suffixes=("", "_opta"))
+
+    # Best-effort join on (web_name, team)
+    if (
+        "web_name" in projections.columns
+        and "team" in projections.columns
+        and "web_name" in opta.columns
+        and "team" in opta.columns
+    ):
+        return projections.merge(opta, on=["web_name", "team"], how="left", suffixes=("", "_opta"))
+
+    return projections
+
+
+@st.cache_data
+def get_my_team(entry_id: int, gw: int) -> pd.DataFrame:
+    url = f"https://fantasy.premierleague.com/api/entry/{entry_id}/event/{gw}/picks/"
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        picks = r.json().get("picks", [])
+        return pd.DataFrame(picks)
+    except Exception:
+        # No local fallback message in UI (as requested). Still return empty on failure.
+        return pd.DataFrame(columns=["element", "position", "is_captain"])
+
+
+def badge_path(name: str) -> str:
+    candidates = [
+        Path("site") / "assets" / "badges" / f"{name}.svg",
+        Path("assets") / "badges" / f"{name}.svg",
+        Path("site") / "assets" / "badges" / f"{name}.png",
+        Path("assets") / "badges" / f"{name}.png",
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                return str(p)
+        except Exception:
+            continue
+    return str(candidates[0])
+
+
 @st.cache_data
 def load_team_lookup() -> dict[int, dict[str, str]]:
-    """Load team lookup from FPL bootstrap-static."""
+    """Load team lookup from FPL bootstrap-static, with data/teams.(csv|json) fallback.
+
+    Returns: {team_id: {"short_name": str, "team_name": str}}
+    """
     out: dict[int, dict[str, str]] = {}
+    p_json = DATA / "teams.json"
+    p_csv = DATA / "teams.csv"
+
     try:
-        payload = fetch_bootstrap_json()
-        teams = payload.get("teams", [])
+        r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/", timeout=20)
+        r.raise_for_status()
+        payload = r.json()
+        teams = payload.get("teams", []) if isinstance(payload, dict) else []
         for t in teams:
             try:
                 tid = int(t.get("id"))
                 out[tid] = {
                     "short_name": str(t.get("short_name") or tid),
                     "team_name": str(t.get("name") or t.get("short_name") or tid),
-                    "team_code": int(t.get("code", 0))
                 }
             except Exception:
                 continue
     except Exception:
         pass
+
+    try:
+        if p_json.exists():
+            payload = json.loads(p_json.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                for k, v in payload.items():
+                    try:
+                        tid = int(k)
+                        if tid in out:
+                            continue
+                        if isinstance(v, dict):
+                            out[tid] = {
+                                "short_name": str(v.get("short_name") or v.get("short") or v.get("name") or tid),
+                                "team_name": str(v.get("team_name") or v.get("name") or tid),
+                            }
+                        else:
+                            out[tid] = {"short_name": str(v), "team_name": str(v)}
+                    except Exception:
+                        continue
+            elif isinstance(payload, list):
+                for t in payload:
+                    try:
+                        tid = int(t.get("id"))
+                        if tid in out:
+                            continue
+                        out[tid] = {
+                            "short_name": str(t.get("short_name") or t.get("short") or t.get("name") or tid),
+                            "team_name": str(t.get("team_name") or t.get("name") or t.get("short_name") or tid),
+                        }
+                    except Exception:
+                        continue
+
+        elif p_csv.exists():
+            df = pd.read_csv(p_csv)
+            for _, r in df.iterrows():
+                try:
+                    tid = int(r.get("id") if "id" in df.columns else r.get("team_id"))
+                    if tid in out:
+                        continue
+                    short_name = r.get("short_name") if "short_name" in df.columns else None
+                    team_name = r.get("team_name") if "team_name" in df.columns else None
+                    out[tid] = {
+                        "short_name": str(short_name or tid),
+                        "team_name": str(team_name or short_name or tid),
+                    }
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     return out
 
+
 def team_short_name(team_id: Any) -> str:
-    """Get team short name."""
     try:
         tid = int(team_id)
     except Exception:
         return str(team_id) if team_id is not None else ""
-    
     t = load_team_lookup().get(tid)
     return (t or {}).get("short_name") or str(tid)
 
+
 def team_full_name(team_id: Any) -> str:
-    """Get team full name."""
     try:
         tid = int(team_id)
     except Exception:
         return str(team_id) if team_id is not None else ""
-    
     t = load_team_lookup().get(tid)
     return (t or {}).get("team_name") or (t or {}).get("short_name") or str(tid)
 
-def normalize_projections(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize common column names for projections."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    
-    df = df.copy()
-    
-    # player_id
-    id_col = next((c for c in df.columns if str(c).lower() in ["player_id", "element", "id"]), None)
-    if id_col:
-        df["player_id"] = pd.to_numeric(df[id_col], errors="coerce").astype("Int64")
-    else:
-        # Some projection exports don't include the FPL element id.
-        # Best-effort: infer from FPL bootstrap-static by matching (name + team short).
-        df["player_id"] = pd.Series([pd.NA] * len(df), dtype="Int64")
 
-        try:
-            els = load_bootstrap_elements()
-            if not els.empty and "id" in els.columns and "team" in els.columns:
-                els2 = els.copy()
-                els2["team_short"] = els2["team"].map(team_short_name).astype(str).str.upper().str.strip()
-                els2["_fn"] = els2.get("first_name", "").astype(str).str.lower().str.strip()
-                els2["_sn"] = els2.get("second_name", "").astype(str).str.lower().str.strip()
-                els2["_wn"] = els2.get("web_name", "").astype(str).str.lower().str.strip()
-
-                proj = df.copy()
-                proj["_team"] = proj.get("team", "").astype(str).str.upper().str.strip()
-                proj["_fn"] = proj.get("first_name", "").astype(str).str.lower().str.strip()
-                proj["_sn"] = proj.get("second_name", "").astype(str).str.lower().str.strip()
-                proj["_wn"] = proj.get("web_name", "").astype(str).str.lower().str.strip()
-
-                # Pass 1: (first_name, second_name, team_short)
-                key_map_full = {
-                    (r["_fn"], r["_sn"], r["team_short"]): int(r["id"])
-                    for _, r in els2.iterrows()
-                    if pd.notna(r.get("id"))
-                }
-                inferred = proj.apply(
-                    lambda r: key_map_full.get((r.get("_fn"), r.get("_sn"), r.get("_team"))),
-                    axis=1,
-                )
-
-                # Pass 2: (web_name, team_short) for any still-missing
-                key_map_wn = {
-                    (r["_wn"], r["team_short"]): int(r["id"])
-                    for _, r in els2.iterrows()
-                    if pd.notna(r.get("id"))
-                }
-                inferred2 = proj.apply(
-                    lambda r: key_map_wn.get((r.get("_wn"), r.get("_team"))),
-                    axis=1,
-                )
-
-                # Combine
-                df["player_id"] = pd.to_numeric(inferred.fillna(inferred2), errors="coerce").astype("Int64")
-        except Exception:
-            # Keep player_id as NA if inference fails.
-            pass
-    
-    # web_name
-    name_col = next((c for c in df.columns if c.lower() in ["web_name", "name", "player"]), None)
-    if name_col:
-        df["web_name"] = df[name_col]
-    
-    # team_id
-    team_id_col = next((c for c in df.columns if c.lower() in ["team_id", "teamid"]), None)
-    if team_id_col:
-        df["team_id"] = pd.to_numeric(df[team_id_col], errors="coerce").astype("Int64")
-    
-    # team
-    team_col = next((c for c in df.columns if c.lower() in ["team", "team_name", "club"]), None)
-    if team_col:
-        df["team"] = df[team_col]
-    
-    # position
-    pos_col = next((c for c in df.columns if c.lower() in ["position", "pos"]), None)
-    if pos_col:
-        df["position"] = df[pos_col]
-    
-    POS_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-    if "position" not in df.columns and "element_type" in df.columns:
-        df["position"] = pd.to_numeric(df["element_type"], errors="coerce").map(POS_MAP)
-
-    # Normalize common string position names
-    if "position" in df.columns:
-        pos_s = df["position"].astype(str).str.strip().str.lower()
-        df.loc[pos_s.str.contains("keeper"), "position"] = "GK"
-        df.loc[pos_s.str.contains("goal"), "position"] = "GK"
-        df.loc[pos_s.str.contains("def"), "position"] = "DEF"
-        df.loc[pos_s.str.contains("mid"), "position"] = "MID"
-        df.loc[pos_s.str.contains("for"), "position"] = "FWD"
-    
-    # price
-    price_col = None
-    if "now_cost" in df.columns:
-        price_col = "now_cost"
-    else:
-        price_col = next((c for c in df.columns if str(c).lower() in ["price", "value"]), None)
-    
-    if price_col:
-        price = pd.to_numeric(df[price_col], errors="coerce")
-        if str(price_col).lower() == "now_cost":
-            # Some sources provide now_cost in tenths (e.g. 72 -> 7.2), others already in £m (e.g. 7.2).
-            # Heuristic: if values look like tenths (mostly integers and max > 25), divide by 10.
-            p = price.dropna()
-            if not p.empty:
-                mostly_int = float(((p % 1) == 0).mean()) if len(p) else 0.0
-                if (p.max() > 25 and mostly_int >= 0.8) or p.max() > 250:
-                    price = price / 10.0
-        elif price.max() > 1000:
-            price = price / 10.0
-        df["price"] = price.fillna(0.0)
-    else:
-        df["price"] = 0.0
-    
-    # proj_points
-    proj_col = next((c for c in df.columns if c.lower() in ["proj_points", "projected_points", "proj"]), None)
-    if proj_col:
-        df["proj_points"] = pd.to_numeric(df[proj_col], errors="coerce").fillna(0.0)
-    elif "proj_points_next_6" in df.columns:
-        df["proj_points"] = pd.to_numeric(df["proj_points_next_6"], errors="coerce").fillna(0.0)
-    elif "proj_points_next_5" in df.columns:
-        df["proj_points"] = pd.to_numeric(df["proj_points_next_5"], errors="coerce").fillna(0.0)
-    else:
-        gw_cols = [c for c in df.columns if re.match(r"^GW\d+_proj_points$", str(c))]
-        if gw_cols:
-            df["proj_points"] = (
-                pd.concat([pd.to_numeric(df[c], errors="coerce").fillna(0.0) for c in gw_cols], axis=1)
-                .sum(axis=1)
-                .astype(float)
-            )
-        else:
-            df["proj_points"] = 0.0
-    
-    # team_code
-    if "team_code" not in df.columns and "code" in df.columns:
-        df["team_code"] = pd.to_numeric(df["code"], errors="coerce").astype("Int64")
-    
-    # Enrich team names if needed
-    if "team" in df.columns and "team_id" in df.columns:
-        team_lookup = load_team_lookup()
-        def team_short(team_id, team_raw):
-            if team_id is not None and team_id in team_lookup:
-                return team_lookup[team_id].get("short_name") or str(team_id)
-            if pd.notna(team_raw):
-                return str(team_raw)
-            return ""
-        
-        df["team"] = df.apply(lambda r: team_short(int(r["team_id"]) if pd.notna(r["team_id"]) else None, r.get("team")), axis=1)
-    
-    return df
-
-def price_options_from_proj(df: pd.DataFrame, step: float = 0.5, default_min: float = 3.5, default_max: float = 15.0):
-    """Generate price filter options."""
+def price_options_from_proj(
+    df: pd.DataFrame, step: float = 0.5, default_min: float = 3.5, default_max: float = 15.0
+):
     if df is None or df.empty or "price" not in df.columns:
         lo, hi = default_min, default_max
     else:
         lo = float(df["price"].min())
         hi = float(df["price"].max())
-        lo = max(default_min, int(lo * 2) / 2.0)
-        hi = max(lo + step, int(hi * 2 + 1) / 2.0)
-    
+        lo = max(default_min, (int(lo * 2) / 2.0))
+        hi = max(lo + step, (int(hi * 2 + 1) / 2.0))
+        hi = min(hi, float(default_max))
     opts = []
     v = lo
     while v <= hi + 1e-9:
@@ -330,12 +385,156 @@ def price_options_from_proj(df: pd.DataFrame, step: float = 0.5, default_min: fl
         v += step
     return opts
 
+
+def normalize_projections(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize common column names for projections so the app is robust to schema differences."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+
+    # player id
+    id_col = next((c for c in df.columns if c.lower() in ("player_id", "element", "id")), None)
+    if id_col:
+        df["player_id"] = pd.to_numeric(df[id_col], errors="coerce").astype("Int64")
+
+    # name
+    name_col = next((c for c in df.columns if c.lower() in ("web_name", "name", "player", "full_name")), None)
+    if name_col:
+        df["web_name"] = df[name_col]
+
+    # team (preserve numeric ids where possible)
+    team_id_col = next((c for c in df.columns if c.lower() in ("team_id", "teamid")), None)
+    if team_id_col:
+        df["team_id"] = pd.to_numeric(df[team_id_col], errors="coerce").astype("Int64")
+
+    team_col = next((c for c in df.columns if c.lower() in ("team", "team_name", "club")), None)
+    if team_col:
+        df["team"] = df[team_col]
+        if "team_id" not in df.columns:
+            parsed = pd.to_numeric(df["team"], errors="coerce")
+            if parsed.notna().any():
+                df["team_id"] = parsed.astype("Int64")
+
+    # position
+    pos_col = next((c for c in df.columns if c.lower() in ("position", "pos", "position_name")), None)
+    if pos_col:
+        df["position"] = df[pos_col]
+
+    POS_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+    if "position" not in df.columns and "element_type" in df.columns:
+        # FPL bootstrap-static uses element_type: 1 GK, 2 DEF, 3 MID, 4 FWD
+        df["position"] = pd.to_numeric(df["element_type"], errors="coerce").map(POS_MAP)
+
+    if "position" in df.columns:
+        try:
+            df["position"] = df["position"].apply(lambda v: POS_MAP.get(int(v), v) if pd.notna(v) else v)
+        except Exception:
+            pass
+
+    # price
+    # Prefer FPL bootstrap `now_cost` (tenths) over a placeholder `price` column.
+    price_col = None
+    lower_to_col = {str(c).lower(): c for c in df.columns}
+    if "now_cost" in lower_to_col:
+        price_col = lower_to_col["now_cost"]
+    else:
+        price_col = next((c for c in df.columns if str(c).lower() in ("price", "value", "£m")), None)
+    if price_col:
+        price = pd.to_numeric(df[price_col], errors="coerce")
+        # FPL now_cost is in tenths (e.g., 75 => £7.5m)
+        if str(price_col).lower() == "now_cost":
+            price = price / 10.0
+        elif price.max() > 1000:
+            price = price / 10.0
+        df["price"] = price.fillna(0.0)
+    else:
+        df["price"] = 0.0
+
+    # projected points
+    proj_col = next(
+        (
+            c
+            for c in df.columns
+            if c.lower() in ("proj_points", "projected_points", "proj", "predicted_points", "projected")
+        ),
+        None,
+    )
+    if proj_col:
+        df["proj_points"] = pd.to_numeric(df[proj_col], errors="coerce").fillna(0.0)
+    else:
+        df["proj_points"] = 0.0
+
+    # If the projections file is the multi-GW output (GWxx_proj_points columns), compute a total.
+    gw_cols = [c for c in df.columns if re.match(r"^GW\d+_proj_points$", str(c))]
+    if gw_cols and ("proj_points" not in df.columns or pd.to_numeric(df["proj_points"], errors="coerce").fillna(0).sum() == 0):
+        df["proj_points"] = (
+            df[gw_cols]
+            .apply(lambda s: pd.to_numeric(s, errors="coerce"))
+            .fillna(0.0)
+            .sum(axis=1)
+        )
+
+    for q in ("p10", "p50", "p90"):
+        q_col = next((c for c in df.columns if c.lower() == q), None)
+        df[q] = pd.to_numeric(df[q_col], errors="coerce").fillna(0.0) if q_col else 0.0
+
+    # minutes probability (optional)
+    mp_col = next((c for c in df.columns if c.lower() in ("minutes_prob", "minutes_probability", "min_prob")), None)
+    if mp_col:
+        df["minutes_prob"] = pd.to_numeric(df[mp_col], errors="coerce").fillna(0.0)
+        df["_has_minutes_prob"] = True
+    else:
+        df["minutes_prob"] = 1.0
+        df["_has_minutes_prob"] = False
+
+    # If we only have FPL bootstrap team id, treat it as team_id for labeling.
+    if "team_id" not in df.columns and "fpl_team_id" in df.columns:
+        df["team_id"] = pd.to_numeric(df["fpl_team_id"], errors="coerce").astype("Int64")
+
+    # team labels + badges
+    if "team" in df.columns or "team_id" in df.columns:
+        team_lookup = load_team_lookup()
+
+        def _team_short(team_id: int | None, team_raw: Any) -> str:
+            if team_id is not None and team_id in team_lookup:
+                return team_lookup[team_id].get("short_name") or str(team_id)
+            if pd.notna(team_raw):
+                return str(team_raw)
+            return ""
+
+        if "team_id" in df.columns:
+            df["team"] = df.apply(
+                lambda r: _team_short((int(r["team_id"]) if pd.notna(r["team_id"]) else None), r.get("team")),
+                axis=1,
+            )
+        else:
+            df["team"] = df["team"].apply(lambda t: _team_short(None, t))
+
+        def _badge_for_row(r) -> str:
+            tid = None
+            try:
+                tid = int(r.get("team_id")) if pd.notna(r.get("team_id")) else None
+            except Exception:
+                tid = None
+            short = r.get("team")
+            p = badge_path(short) if short else ""
+            if p and Path(p).exists():
+                return p
+            return badge_path(str(tid)) if tid is not None else p
+
+        df["badge"] = df.apply(_badge_for_row, axis=1)
+
+    return df
+
+
 @st.cache_data
 def load_bootstrap_elements() -> pd.DataFrame:
-    """Load FPL bootstrap-static elements."""
+    """Load FPL bootstrap-static elements for richer table columns."""
     try:
-        payload = fetch_bootstrap_json()
-        els = payload.get("elements", [])
+        r = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/", timeout=20)
+        r.raise_for_status()
+        payload = r.json()
+        els = payload.get("elements", []) if isinstance(payload, dict) else []
         df = pd.DataFrame(els)
         if not df.empty and "id" in df.columns:
             df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
@@ -344,1831 +543,1420 @@ def load_bootstrap_elements() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=60 * 30)
-def fetch_bootstrap_json() -> dict[str, Any]:
-    """Fetch FPL bootstrap-static (cached with TTL)."""
-    return get_with_retry("https://fantasy.premierleague.com/api/bootstrap-static/", timeout=20).json()
-
-
-@st.cache_data(ttl=60 * 30)
-def fetch_fixtures_json() -> list[dict[str, Any]]:
-    """Fetch FPL fixtures (cached with TTL)."""
-    payload = get_with_retry(FIXTURES_URL, timeout=20).json()
-    return payload if isinstance(payload, list) else []
-
-
-def _normalize_key(v: Any) -> str:
-    if v is None:
-        return ""
-    s = str(v).lower().strip()
-    s = re.sub(r"[^a-z0-9]+", "", s)
-    return s
-
-
-def _normalize_team_key(v: Any) -> str:
-    """Normalize team names to a canonical key (handles common aliases)."""
-    k = _normalize_key(v)
-    if not k:
-        return ""
-
-    alias = {
-        # Manchester clubs
-        "manutd": "manchesterunited",
-        "manunited": "manchesterunited",
-        "mufc": "manchesterunited",
-        "manutd": "manchesterunited",
-        "mancity": "manchestercity",
-        "mcfc": "manchestercity",
-        # Spurs / Wolves / Forest
-        "spurs": "tottenhamhotspur",
-        "tottenham": "tottenhamhotspur",
-        "wolves": "wolverhamptonwanderers",
-        "wwfc": "wolverhamptonwanderers",
-        "forest": "nottinghamforest",
-        "nffc": "nottinghamforest",
-        # Other common
-        "westham": "westhamunited",
-        "newcastle": "newcastleunited",
-        "brighton": "brightonhovealbion",
-        "leicester": "leicestercity",
-        "ipswich": "ipswichtown",
-        "sheffutd": "sheffieldunited",
-        "sheffieldutd": "sheffieldunited",
-        # strip suffixes
-        "afcbournemouth": "bournemouth",
-    }
-    if k in alias:
-        return alias[k]
-
-    # remove common suffixes
-    for suf in ("fc", "afc"):
-        if k.endswith(suf) and len(k) > len(suf) + 2:
-            k = k[: -len(suf)]
-    return alias.get(k, k)
-
-
-@st.cache_data(ttl=60 * 60)
-def team_key_map() -> dict[str, str]:
-    """Map various team tokens (short/full/aliases) to a canonical key."""
-    m: dict[str, str] = {}
-    lookup = load_team_lookup()
-    for _, t in lookup.items():
-        short = str(t.get("short_name") or "")
-        full = str(t.get("team_name") or "")
-        canonical = _normalize_team_key(full or short)
-        if short:
-            m[_normalize_team_key(short)] = canonical
-            m[_normalize_key(short)] = canonical
-        if full:
-            m[_normalize_team_key(full)] = canonical
-            m[_normalize_key(full)] = canonical
-    return m
-
-
-@st.cache_data(ttl=60 * 30)
-def fetch_livefpl_prices() -> pd.DataFrame:
-    """Fetch and parse LiveFPL price predictor table.
-
-    Returns a dataframe with (web_name, team_livefpl, prediction_pct, prediction_eta).
-    Best-effort: if parsing fails, returns empty dataframe.
-    """
-    try:
-        html = requests.get(
-            LIVEFPL_PRICES_URL,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=30,
-        ).text
-    except Exception:
-        return pd.DataFrame()
-
-    try:
-        tables = pd.read_html(StringIO(html))
-    except Exception:
-        return pd.DataFrame()
-
-    if not tables:
-        return pd.DataFrame()
-
-    main: pd.DataFrame | None = None
-    for t in tables:
-        try:
-            cols = [str(c) for c in t.columns]
-        except Exception:
-            continue
-        if "Progress Now" in cols and any("Prediction" in c for c in cols):
-            main = t
-            break
-
-    if main is None or main.empty or "Player" not in main.columns:
-        return pd.DataFrame()
-
-    df = main.copy()
-
-    # Team appears in an unnamed column on LiveFPL (currently Unnamed: 2)
-    team_col = None
-    for c in df.columns:
-        if str(c).lower().strip() in {"team", "unnamed: 2"}:
-            team_col = c
-            break
-    if team_col is None:
-        # fallback: pick any unnamed column
-        unnamed = [c for c in df.columns if str(c).lower().startswith("unnamed")]
-        team_col = unnamed[-1] if unnamed else None
-
-    pred_col = next((c for c in df.columns if "Prediction" in str(c)), None)
-    if pred_col is None:
-        return pd.DataFrame()
-
-    player_raw = df["Player"].astype(str).str.replace("Â£", "£", regex=False).str.strip()
-
-    # Example: "Gakpo  MID £7.3"
-    m = player_raw.str.extract(r"^(?P<name>.*?)\s{2,}(?P<pos>GK|DEF|MID|FW)\s*£(?P<price>\d+(?:\.\d+)?)")
-    web_name = m["name"].astype(str).str.strip()
-    pos = m["pos"].astype(str).str.strip().replace({"FW": "FWD"})
-    price = pd.to_numeric(m["price"], errors="coerce")
-
-    team_livefpl = df[team_col].astype(str).str.strip() if team_col in df.columns else ""
-    pred_str = df[pred_col].astype(str).str.strip()
-
-    pred_pct = pd.to_numeric(pred_str.str.extract(r"([-+]?\d+(?:\.\d+)?)")[0], errors="coerce")
-    pred_eta = pred_str.str.replace(r"^[-+]?\d+(?:\.\d+)?%\s*", "", regex=True).str.strip()
-
-    out = pd.DataFrame(
-        {
-            "web_name": web_name,
-            "team_livefpl": team_livefpl,
-            "pos_livefpl": pos,
-            "price_livefpl": price,
-            "prediction_pct": pred_pct,
-            "prediction_eta": pred_eta,
-        }
-    )
-    out = out.dropna(subset=["web_name"]).copy()
-    out["name_key"] = out["web_name"].map(_normalize_key)
-    out["team_key"] = out["team_livefpl"].map(_normalize_team_key)
-    return out
-
-
-def _bootstrap_identity(player_id: int) -> dict[str, Any]:
-    """Return identifying info for a player_id from FPL bootstrap-static."""
-    try:
-        pid = int(player_id)
-    except Exception:
-        return {}
-
-    els = load_bootstrap_elements()
-    if els.empty or "id" not in els.columns:
-        return {}
-
-    try:
-        row = els[els["id"].astype("Int64") == pid].iloc[0]
-    except Exception:
-        return {}
-
-    name = str(row.get("web_name", "") or "").strip()
-    first = str(row.get("first_name", "") or "").strip()
-    second = str(row.get("second_name", "") or "").strip()
-    try:
-        team_id = int(row.get("team"))
-    except Exception:
-        team_id = None
-
-    team_lookup = load_team_lookup()
-    team_short = team_short_name(team_id) if team_id is not None else ""
-    team_full = (team_lookup.get(int(team_id), {}) if team_id is not None else {}).get("team_name", "") if team_id is not None else ""
-
-    element_type = row.get("element_type")
-    try:
-        element_type = int(element_type)
-    except Exception:
-        element_type = None
-    pos = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}.get(element_type, "")
-
-    try:
-        price = float(row.get("now_cost", 0)) / 10.0
-    except Exception:
-        price = None
-
-    tk_map = team_key_map()
-    team_key = tk_map.get(_normalize_team_key(team_full), _normalize_team_key(team_full or team_short))
-
-    return {
-        "player_id": pid,
-        "web_name": name,
-        "first_name": first,
-        "second_name": second,
-        "team_short": team_short,
-        "team_full": team_full,
-        "team_key": team_key,
-        "position": pos,
-        "price": price,
-    }
-
-
-def _best_livefpl_row_for_player(player_id: int) -> dict[str, Any] | None:
-    """Choose best LiveFPL row for an FPL player_id (handles ambiguous names)."""
-    ident = _bootstrap_identity(player_id)
-    if not ident:
-        return None
-
-    live = fetch_livefpl_prices()
-    if live is None or live.empty:
-        return None
-
-    # Candidate name keys (LiveFPL uses web_name-like values most of the time)
-    name_keys = [
-        _normalize_key(ident.get("web_name")),
-        _normalize_key(ident.get("second_name")),
-        _normalize_key(f"{ident.get('first_name','')} {ident.get('second_name','')}")
-    ]
-    name_keys = [k for k in name_keys if k]
-
-    cand = live[live["name_key"].isin(name_keys)].copy()
-    if cand.empty and name_keys:
-        # Fuzzy fallback: compute similarity against full table (table is ~600 rows)
-        target = name_keys[0]
-        # lightweight similarity: common prefix + length proximity
-        nk = live["name_key"].astype(str)
-        scores = nk.apply(lambda s: (len(os.path.commonprefix([s, target])) / max(len(target), 1)) if s else 0.0)
-        best_idx = scores.idxmax() if not scores.empty else None
-        if best_idx is not None and float(scores.loc[best_idx]) >= 0.8:
-            cand = live.loc[[best_idx]].copy()
-
-    if cand.empty:
-        return None
-
-    team_key = str(ident.get("team_key") or "")
-    pos = str(ident.get("position") or "")
-    price = ident.get("price")
-
-    def score_row(r: pd.Series) -> float:
-        s = 0.0
-        if str(r.get("name_key")) in name_keys:
-            s += 10.0
-        if team_key and str(r.get("team_key")) == team_key:
-            s += 6.0
-        if pos and str(r.get("pos_livefpl")) == pos:
-            s += 3.0
-        try:
-            lp = float(r.get("price_livefpl"))
-            if price is not None:
-                d = abs(float(price) - lp)
-                if d <= 0.05:
-                    s += 2.0
-                elif d <= 0.2:
-                    s += 1.0
-        except Exception:
-            pass
-        return s
-
-    cand["_score"] = cand.apply(score_row, axis=1)
-    best = cand.sort_values(["_score"], ascending=False).iloc[0].to_dict()
-    return best
-
-
-@st.cache_data(ttl=60 * 30)
-def compute_livefpl_trend_map(player_ids: tuple[int, ...]) -> dict[int, str]:
-    """Compute a player_id -> trend label map (cached) for a set of player ids."""
-    out: dict[int, str] = {}
-    for pid in player_ids:
-        try:
-            pid_i = int(pid)
-        except Exception:
-            continue
-
-        r = _best_livefpl_row_for_player(pid_i)
-        if not r:
-            out[pid_i] = "n/a"
-            continue
-
-        try:
-            pct = float(r.get("prediction_pct"))
-        except Exception:
-            out[pid_i] = "n/a"
-            continue
-
-        eta = str(r.get("prediction_eta", "") or "").strip()
-        if pct >= 100:
-            arrow = "↑"
-        elif pct <= -100:
-            arrow = "↓"
-        else:
-            arrow = "→"
-        out[pid_i] = f"{arrow} {pct:.0f}% {eta}".strip()
-
-    return out
-
-
-def estimate_price_change(player_id: int, current_price: float, proj_points: float, selected_by_pct: float) -> str:
-    """Best-effort price trend label using LiveFPL predictor (% to target).
-
-    Returns a short label: "↑ 103%", "↓ -101%", or "→ 42%" (plus an ETA when available).
-    """
-    _ = (current_price, proj_points, selected_by_pct)  # signature parity; values optional
-
-    try:
-        pid = int(player_id)
-    except Exception:
-        return "n/a"
-
-    trend_map = compute_livefpl_trend_map((pid,))
-    return trend_map.get(pid, "n/a")
-
-
-@st.cache_data(ttl=3600)
-def fetch_player_history(player_id: int) -> pd.DataFrame:
-    """Fetch player's GW-by-GW history from FPL API."""
-    url = f"https://fantasy.premierleague.com/api/element-summary/{int(player_id)}/"
-    try:
-        r = get_with_retry(url, timeout=15)
-        history = r.json().get("history", [])
-        df = pd.DataFrame(history)
-        df["player_id"] = int(player_id)
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-def create_points_chart(df: pd.DataFrame, name: str) -> go.Figure:
-    """Create interactive points history chart."""
-    if df is None or df.empty or "round" not in df.columns:
-        return go.Figure()
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=df["round"],
-            y=df.get("total_points", 0),
-            name="Points",
-            marker_color="#00ff87",
-        )
-    )
-
-    pts = pd.to_numeric(df.get("total_points", 0), errors="coerce")
-    if len(df) >= 5 and pts.notna().any():
-        rolling = pts.rolling(5, min_periods=1).mean()
-        fig.add_trace(
-            go.Scatter(
-                x=df["round"],
-                y=rolling,
-                name="5-GW avg",
-                line=dict(color="#ff6b6b", width=3),
-            )
-        )
-
-    fig.update_layout(
-        title=f"{name} - Points History",
-        template="plotly_dark",
-        plot_bgcolor="#37003c",
-        paper_bgcolor="#37003c",
-        margin=dict(l=10, r=10, t=50, b=10),
-    )
-    return fig
-
-
-@st.cache_data
-def load_role_mae() -> dict[str, float]:
-    """Load per-role MAE from artifacts diagnostics (used for uncertainty bands)."""
-    p = Path("artifacts/diagnostics/per_role_ALL.csv")
-    if not p.exists():
-        return {}
-    try:
-        df = pd.read_csv(p)
-        if df.empty or "role" not in df.columns or "mae" not in df.columns:
-            return {}
-        out: dict[str, float] = {}
-        for _, r in df.iterrows():
-            role = str(r.get("role", "")).strip()
-            try:
-                mae = float(r.get("mae"))
-            except Exception:
-                continue
-            if role:
-                out[role] = mae
-        return out
-    except Exception:
-        return {}
-
-
-def attach_uncertainty(df: pd.DataFrame) -> pd.DataFrame:
-    """Attach sigma and (p25,p75) band using per-role MAE (Normal approx)."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    out = df.copy()
-    role_mae = load_role_mae()
-
-    def _role_key(r: pd.Series) -> str:
-        role = str(r.get("role", "") or "").strip()
-        if role:
-            return role
-        pos = str(r.get("position", "") or "").strip()
-        if pos == "MID":
-            return "MID_AM"
-        return pos
-
-    # MAE -> sigma: MAE = sigma * sqrt(2/pi)
-    k = math.sqrt(math.pi / 2.0)
-    maes = out.apply(lambda r: role_mae.get(_role_key(r), role_mae.get("MID_AM" if str(r.get("position")) == "MID" else str(r.get("position")), role_mae.get("DEF", 3.37))), axis=1)
-    out["sigma"] = pd.to_numeric(maes, errors="coerce").fillna(3.37) * k
-
-    mu = pd.to_numeric(out.get("proj_points", 0), errors="coerce").fillna(0.0)
-    # Normal quantile for 25/75 is +/- 0.674*sigma
-    half_iqr = 0.67448975 * pd.to_numeric(out["sigma"], errors="coerce").fillna(0.0)
-    out["proj_p25"] = (mu - half_iqr).clip(lower=0.0)
-    out["proj_p75"] = (mu + half_iqr)
-    return out
-
-
-def attach_reason_codes(df: pd.DataFrame, *, fixture_index: dict[int, dict[int, list[dict[str, Any]]]], gw: int) -> pd.DataFrame:
-    """Add short, human-readable reason codes + next fixtures string."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-
-    def _fixtures_str(team_id: Any) -> str:
-        try:
-            tid = int(team_id)
-        except Exception:
-            return ""
-        parts: list[str] = []
-        for g in range(int(gw), int(gw) + 3):
-            fx_list = (fixture_index.get(tid, {}) or {}).get(int(g), [])
-            if not fx_list:
-                continue
-            fx = fx_list[0]
-            opp = team_short_name(fx.get("opp_id"))
-            ha = fx.get("ha")
-            parts.append(f"{opp}({ha})")
-        return " | ".join(parts)
-
-    reasons: list[str] = []
-    fixtures_next: list[str] = []
-    for _, r in out.iterrows():
-        t: list[str] = []
-        xgi90 = pd.to_numeric(r.get("expected_goal_involvements_per_90"), errors="coerce")
-        thr = pd.to_numeric(r.get("threat"), errors="coerce")
-        cre = pd.to_numeric(r.get("creativity"), errors="coerce")
-        defcon = pd.to_numeric(r.get("defcon_points"), errors="coerce")
-        xgc90 = pd.to_numeric(r.get("expected_goals_conceded_per_90"), errors="coerce")
-
-        if pd.notna(xgi90) and float(xgi90) >= 0.45:
-            t.append("High xGI/90")
-        if pd.notna(thr) and float(thr) >= 300:
-            t.append("High Threat")
-        if pd.notna(cre) and float(cre) >= 250:
-            t.append("Chance creation")
-        if pd.notna(defcon) and float(defcon) >= 10:
-            t.append("Strong DEFCON")
-        if pd.notna(xgc90) and float(xgc90) <= 1.1 and str(r.get("position")) == "DEF":
-            t.append("Low xGC/90")
-
-        role = str(r.get("role", "") or "")
-        if role in ["MID_DM"] and (pd.isna(xgi90) or float(xgi90 or 0) < 0.25):
-            t.append("DM role—low xGI")
-
-        reasons.append(", ".join(t[:3]) if t else "Balanced profile")
-        fixtures_next.append(_fixtures_str(r.get("team_id")))
-
-    out["why"] = reasons
-    out["fixtures_next3"] = fixtures_next
-    return out
-
 def enrich_with_fpl_stats(projections: pd.DataFrame) -> pd.DataFrame:
-    """Merge FPL bootstrap stats into projections."""
     if projections is None or projections.empty:
         return projections
-    
     els = load_bootstrap_elements()
     if els.empty or "id" not in els.columns or "player_id" not in projections.columns:
         return projections
-    
+
     keep = [
-        "id", "web_name", "element_type", "team",
-        "now_cost", "selected_by_percent",
-        "total_points", "form",
-        "expected_goals_per_90", "expected_assists_per_90", "expected_goal_involvements_per_90",
-        "influence", "creativity", "threat", "ict_index",
-        "minutes", "goals_scored", "assists", "clean_sheets", "goals_conceded"
+        # IDs / identity
+        "id",
+        "first_name",
+        "second_name",
+        "web_name",
+        "element_type",
+
+        # Availability / market signals
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "news",
+        "now_cost",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "ep_next",
+        "ep_this",
+
+        # Points
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+
+        # Expected / ICT
+        "expected_goals",
+        "expected_assists",
+        "expected_goal_involvements",
+        "expected_goals_conceded",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
+        "expected_goals_conceded_per_90",
+        "influence",
+        "creativity",
+        "threat",
+        "ict_index",
+
+        # Underlying basic stats
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
+
+        # Bonus
+        "bonus",
+        "bps",
+
+        # Team id
+        "team",
     ]
     keep = [c for c in keep if c in els.columns]
-    
-    stats = els[keep].copy().rename(columns={"id": "player_id", "team": "fpl_team_id"})
-    
+    stats = els[keep].copy().rename(
+        columns={
+            "id": "player_id",
+            "team": "fpl_team_id",
+            "web_name": "web_name_fpl",
+        }
+    )
     for c in stats.columns:
-        if c in ["player_id"]:
+        if c in ("player_id", "web_name_fpl", "first_name", "second_name", "news"):
             continue
         stats[c] = pd.to_numeric(stats[c], errors="coerce")
-    
+
     out = projections.merge(stats, on="player_id", how="left", suffixes=("", "_fpl"))
-    
-    # Fill missing data
+
+    # Fill missing display name from bootstrap if needed
     if "web_name" not in out.columns and "web_name_fpl" in out.columns:
         out["web_name"] = out["web_name_fpl"]
-    
+    elif "web_name" in out.columns and "web_name_fpl" in out.columns:
+        out["web_name"] = out["web_name"].fillna(out["web_name_fpl"])
+
+    # Promote team id to team_id if projections don't have it
     if "team_id" not in out.columns and "fpl_team_id" in out.columns:
         out["team_id"] = pd.to_numeric(out["fpl_team_id"], errors="coerce").astype("Int64")
-    
-    # Team codes
-    team_lookup = load_team_lookup()
-    if "team_code" not in out.columns and "team_id" in out.columns:
-        out["team_code"] = out["team_id"].map(lambda tid: team_lookup.get(int(tid), {}).get("team_code", 0) if pd.notna(tid) else 0)
-    
+
+    out["xGI"] = (out.get("expected_goals", 0).fillna(0) + out.get("expected_assists", 0).fillna(0))
+    out["GI"] = (out.get("goals_scored", 0).fillna(0) + out.get("assists", 0).fillna(0))
+
+    team_key = "team_id" if "team_id" in out.columns else "fpl_team_id"
+    if team_key in out.columns:
+        totals = out.groupby(team_key, dropna=False).agg(team_xGI=("xGI", "sum"), team_GI=("GI", "sum")).reset_index()
+        out = out.merge(totals, on=team_key, how="left")
+        out["pct_xGI"] = out.apply(
+            lambda r: (100.0 * float(r.get("xGI", 0) or 0) / float(r.get("team_xGI", 0) or 1))
+            if float(r.get("team_xGI", 0) or 0) > 0
+            else 0.0,
+            axis=1,
+        )
+        out["pct_GI"] = out.apply(
+            lambda r: (100.0 * float(r.get("GI", 0) or 0) / float(r.get("team_GI", 0) or 1))
+            if float(r.get("team_GI", 0) or 0) > 0
+            else 0.0,
+            axis=1,
+        )
+    else:
+        out["pct_xGI"] = 0.0
+        out["pct_GI"] = 0.0
+
+    out["gametime"] = (pd.to_numeric(out.get("minutes_prob", 0), errors="coerce").fillna(0.0) * 100.0)
     return out
 
 
-def enrich_with_insights_playerstats(projections: pd.DataFrame) -> pd.DataFrame:
-    """Merge advanced stats from FPL-Core-Insights playerstats.csv (latest GW per player)."""
+@st.cache_data
+def load_insights_playerstats(*, season: str = DEFAULT_INSIGHTS_SEASON) -> pd.DataFrame:
+    """Load FPL-Core-Insights season-level playerstats.csv (latest GW per player)."""
+    path = INSIGHTS_ROOT / season / "playerstats.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    if "id" in df.columns and "player_id" not in df.columns:
+        df = df.rename(columns={"id": "player_id"})
+
+    if "player_id" not in df.columns:
+        return pd.DataFrame()
+
+    df["player_id"] = pd.to_numeric(df["player_id"], errors="coerce").astype("Int64")
+    if "gw" in df.columns:
+        df["gw"] = pd.to_numeric(df["gw"], errors="coerce").astype("Int64")
+
+    # Keep the latest gameweek snapshot per player.
+    if "gw" in df.columns:
+        df = df.dropna(subset=["player_id", "gw"]).copy()
+        df["player_id"] = df["player_id"].astype(int)
+        df["gw"] = df["gw"].astype(int)
+        df = df.sort_values(["player_id", "gw"]).groupby("player_id", sort=False, as_index=False).tail(1)
+    else:
+        df = df.dropna(subset=["player_id"]).copy()
+        df["player_id"] = df["player_id"].astype(int)
+
+    return df
+
+
+def enrich_with_insights_playerstats(projections: pd.DataFrame, *, season: str = DEFAULT_INSIGHTS_SEASON) -> pd.DataFrame:
+    """Merge Insights playerstats into projections (fills tackle/CBI/recoveries/defcon etc.)."""
     if projections is None or projections.empty or "player_id" not in projections.columns:
         return projections
 
-    insights_path = INSIGHTS_PLAYERSTATS
-    if not insights_path.exists():
+    stats = load_insights_playerstats(season=season)
+    if stats.empty or "player_id" not in stats.columns:
         return projections
 
-    try:
-        ins = pd.read_csv(insights_path)
-    except Exception:
-        return projections
-
-    if ins.empty or "id" not in ins.columns:
-        return projections
-
-    ins = ins.copy()
-    ins["id"] = pd.to_numeric(ins["id"], errors="coerce").astype("Int64")
-    if "gw" in ins.columns:
-        ins["gw"] = pd.to_numeric(ins["gw"], errors="coerce")
-        ins = ins.sort_values(["id", "gw"], ascending=[True, True])
-        ins_latest = ins.dropna(subset=["id"]).groupby("id", as_index=False).tail(1)
-    else:
-        ins_latest = ins.dropna(subset=["id"]).drop_duplicates(subset=["id"], keep="last")
-
-    adv_cols = [
-        "id",
+    # Only bring across the fields we want to display.
+    desired = [
+        "player_id",
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "now_cost",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
         "expected_goals_conceded_per_90",
-        "expected_goals_conceded",
+        "influence",
+        "creativity",
+        "threat",
+        "ict_index",
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
         "defensive_contribution",
         "defensive_contribution_per_90",
         "tackles",
         "clearances_blocks_interceptions",
         "recoveries",
+        "clean_sheets_per_90",
+        "goals_conceded_per_90",
+        "starts_per_90",
+        "news",
     ]
-    adv_cols = [c for c in adv_cols if c in ins_latest.columns]
-    if "id" not in adv_cols or len(adv_cols) == 1:
-        return projections
+    keep = [c for c in desired if c in stats.columns]
+    s2 = stats[keep].copy()
 
-    adv = ins_latest[adv_cols].copy().rename(columns={"id": "player_id"})
-    adv["player_id"] = pd.to_numeric(adv["player_id"], errors="coerce").astype("Int64")
+    # Keep string columns as strings; coerce numeric where appropriate.
+    for c in s2.columns:
+        if c in ("player_id", "news"):
+            continue
+        s2[c] = pd.to_numeric(s2[c], errors="coerce")
 
-    out = projections.copy()
-    out["player_id"] = pd.to_numeric(out["player_id"], errors="coerce").astype("Int64")
-    out = out.merge(adv, on="player_id", how="left", suffixes=("", "_insights"))
+    out = projections.merge(s2, on="player_id", how="left", suffixes=("", "_insights"))
 
-    # Fill missing values from insights (do not overwrite existing non-null values)
-    # Note: some projection exports include placeholder blanks/zeros; treat those as missing
-    _treat_zero_as_missing = {
+    # Prefer live bootstrap for some fields, but fill any missing from insights.
+    def _fill(col: str) -> None:
+        alt = f"{col}_insights"
+        if col in out.columns and alt in out.columns:
+            out[col] = out[col].fillna(out[alt])
+
+    for col in (
+        "chance_of_playing_this_round",
+        "chance_of_playing_next_round",
+        "now_cost",
+        "selected_by_percent",
+        "value_form",
+        "value_season",
+        "total_points",
+        "event_points",
+        "points_per_game",
+        "form",
+        "expected_goals_per_90",
+        "expected_assists_per_90",
+        "expected_goal_involvements_per_90",
         "expected_goals_conceded_per_90",
-        "expected_goals_conceded",
-    }
-    for col in adv_cols:
-        if col == "id":
-            continue
-        insights_col = f"{col}_insights"
-        if insights_col not in out.columns:
-            continue
-        if col not in out.columns:
-            out[col] = out[insights_col]
-        else:
-            base = out[col]
-            insv = out[insights_col]
+        "influence",
+        "creativity",
+        "threat",
+        "ict_index",
+        "minutes",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "goals_conceded",
+        "starts",
+        "defensive_contribution",
+        "defensive_contribution_per_90",
+        "tackles",
+        "clearances_blocks_interceptions",
+        "recoveries",
+        "clean_sheets_per_90",
+        "goals_conceded_per_90",
+        "starts_per_90",
+        "news",
+    ):
+        _fill(col)
 
-            # For numeric columns: coerce so that blanks become NaN
-            base_num = pd.to_numeric(base, errors="coerce")
-            ins_num = pd.to_numeric(insv, errors="coerce")
-
-            if col in _treat_zero_as_missing:
-                mask = base_num.isna() | (base_num == 0)
-                out[col] = base_num.where(~mask, ins_num)
-            else:
-                mask = base_num.isna()
-                out[col] = base_num.where(~mask, ins_num)
-
-    drop_cols = [c for c in out.columns if c.endswith("_insights")]
-    if drop_cols:
-        out = out.drop(columns=drop_cols)
-
-    # Convenience aliases used by some tables/UI
-    if "defcon_points" not in out.columns and "defensive_contribution" in out.columns:
-        out["defcon_points"] = out["defensive_contribution"]
-    if "cbit" not in out.columns and "clearances_blocks_interceptions" in out.columns:
-        out["cbit"] = out["clearances_blocks_interceptions"]
+    # Drop the suffixed columns to avoid clutter.
+    out = out.drop(columns=[c for c in out.columns if str(c).endswith("_insights")])
     return out
 
-def load_projections() -> pd.DataFrame:
-    """Load projections from CSV or JSON."""
-    # Prefer the richer internal CSV when present (includes player_id/team_code)
-    if PROJ_CSV_INTERNAL.exists():
-        df = load_csv(PROJ_CSV_INTERNAL)
-    elif PROJ_CSV.exists():
-        df = load_csv(PROJ_CSV)
-    elif PROJ_JSON.exists():
-        df = load_json(PROJ_JSON)
-    elif PROJ_CSV_FALLBACK.exists():
-        df = load_csv(PROJ_CSV_FALLBACK)
-    else:
+
+def build_clean_playerstats_view(
+    df: pd.DataFrame,
+    *,
+    per_90: bool,
+) -> pd.DataFrame:
+    if df is None or df.empty:
         return pd.DataFrame()
-    
-    df = normalize_projections(df)
-    df = enrich_with_fpl_stats(df)
-    df = enrich_with_insights_playerstats(df)
-    return df
 
-@st.cache_data(ttl=120)
-def get_my_team(entry_id: int, gw: int) -> pd.DataFrame:
-    """Fetch my team from FPL API."""
-    url = f"https://fantasy.premierleague.com/api/entry/{entry_id}/event/{gw}/picks/"
+    def _series(name: str, default=None) -> pd.Series:
+        if name in df.columns:
+            return df[name]
+        return pd.Series([default] * len(df))
+
+    minutes = pd.to_numeric(_series("minutes"), errors="coerce")
+
+    # MID-DM heuristic for showing defensive columns.
+    pos = _series("position", "").astype(str)
+    xgi90 = pd.to_numeric(_series("expected_goal_involvements_per_90"), errors="coerce").fillna(0.0)
+    defcon90 = pd.to_numeric(_series("defensive_contribution_per_90"), errors="coerce").fillna(0.0)
+    threat = pd.to_numeric(_series("threat"), errors="coerce").fillna(0.0)
+    creativity = pd.to_numeric(_series("creativity"), errors="coerce").fillna(0.0)
+
+    defense_proxy = defcon90
+    attack_proxy = xgi90 + 0.005 * (threat + creativity)
+    is_mid_dm = (pos == "MID") & (defense_proxy >= (attack_proxy * 1.25).clip(lower=0.6))
+    show_def_cols = pos.isin(["DEF", "GK"]) | is_mid_dm
+
+    selected_by_percent = pd.to_numeric(_series("selected_by_percent"), errors="coerce")
+
+    view = pd.DataFrame(
+        {
+            "web_name": _series("web_name", ""),
+            "position": pos,
+            "team": _series("team", ""),
+
+            "chance_of_playing_this_round": _series("chance_of_playing_this_round"),
+            "chance_of_playing_next_round": _series("chance_of_playing_next_round"),
+            "news": _series("news", ""),
+
+            "now_cost": _series("now_cost"),
+            "selected_by_percent": selected_by_percent.map(lambda x: f"{x:.1f}%" if pd.notna(x) else pd.NA),
+            "value_form": _series("value_form"),
+            "value_season": _series("value_season"),
+
+            "total_points": _series("total_points"),
+            "event_points": _series("event_points"),
+            "points_per_game": _series("points_per_game"),
+            "form": _series("form"),
+
+            "expected_goals_per_90": _series("expected_goals_per_90"),
+            "expected_assists_per_90": _series("expected_assists_per_90"),
+            "expected_goal_involvements_per_90": _series("expected_goal_involvements_per_90"),
+            "expected_goals_conceded_per_90": _series("expected_goals_conceded_per_90"),
+
+            "influence": _series("influence"),
+            "creativity": _series("creativity"),
+            "threat": _series("threat"),
+            "ict_index": _series("ict_index"),
+
+            "minutes": minutes,
+            "goals_scored": _series("goals_scored"),
+            "assists": _series("assists"),
+            "clean_sheets": _series("clean_sheets"),
+            "goals_conceded": _series("goals_conceded"),
+            "starts": _series("starts"),
+
+            "defensive_contribution_per_90": _series("defensive_contribution_per_90"),
+            "tackles": _series("tackles"),
+            "clearances_blocks_interceptions": _series("clearances_blocks_interceptions"),
+            "recoveries": _series("recoveries"),
+        }
+    )
+
+    # Chance-of-playing sometimes comes as 0..1; normalize to 0..100 if needed.
+    for c in ("chance_of_playing_this_round", "chance_of_playing_next_round"):
+        s = pd.to_numeric(view[c], errors="coerce")
+        if s.notna().any() and float(s.dropna().max()) <= 1.0:
+            view[c] = (s * 100.0).round(0)
+        else:
+            view[c] = s
+
+    # Defensive-only: xGC/90
+    view.loc[~pos.isin(["DEF", "GK"]), "expected_goals_conceded_per_90"] = pd.NA
+
+    # Role-limited defensive columns
+    for c in ("defensive_contribution_per_90", "tackles", "clearances_blocks_interceptions", "recoveries"):
+        view.loc[~show_def_cols, c] = pd.NA
+
+    # Optional: convert the raw box-score stats to per-90 for display.
+    if per_90:
+        mins = pd.to_numeric(view["minutes"], errors="coerce")
+        denom = (mins / 90.0).where(mins.notna() & (mins > 0), other=pd.NA)
+        per90_cols = ["goals_scored", "assists", "clean_sheets", "goals_conceded", "starts", "tackles", "clearances_blocks_interceptions", "recoveries"]
+        for c in per90_cols:
+            view[c] = pd.to_numeric(view[c], errors="coerce") / denom
+
+    # Order by projected points if present, else by total_points.
+    if "proj_points" in df.columns:
+        view["proj_points"] = pd.to_numeric(df.get("proj_points"), errors="coerce")
+        view = view.sort_values("proj_points", ascending=False)
+    else:
+        view = view.sort_values("total_points", ascending=False)
+
+    return view
+
+
+def _first_col(df: pd.DataFrame, candidates: list[str]) -> pd.Series:
+    for c in candidates:
+        if c in df.columns:
+            return df[c]
+    return pd.Series([None] * len(df))
+
+
+def _compute_def_contrib(df: pd.DataFrame) -> pd.Series:
+    candidates = ["defensive_contributions", "def_contrib", "def_contribution"]
+    for c in candidates:
+        if c in df.columns:
+            return pd.to_numeric(df[c], errors="coerce")
+
+    parts = []
+    for c in ["tackles_won", "tackles", "interceptions", "recoveries", "blocks", "clearances", "aerials_won"]:
+        if c in df.columns:
+            parts.append(pd.to_numeric(df[c], errors="coerce").fillna(0.0))
+    if not parts:
+        return pd.Series([None] * len(df))
+    s = parts[0]
+    for p in parts[1:]:
+        s = s + p
+    return s
+
+
+def _drop_empty_columns(view: pd.DataFrame, *, keep: list[str] | None = None) -> pd.DataFrame:
+    if view is None or view.empty:
+        return pd.DataFrame()
+    if keep is None:
+        keep = []
+
+    out = view.copy()
+    for c in list(out.columns):
+        if c in keep:
+            continue
+        s = out[c]
+        if s.isna().all():
+            out = out.drop(columns=[c])
+            continue
+
+        # Numeric-empty: all zeros or NaNs
+        num = pd.to_numeric(s, errors="coerce")
+        if num.notna().any() and float(num.fillna(0.0).abs().sum()) == 0.0:
+            out = out.drop(columns=[c])
+            continue
+
+        # Object-empty: blank strings
+        if num.isna().all() and s.dtype == object:
+            ss = s.astype(str).str.strip()
+            if (ss == "") .all() or (ss.str.lower() == "nan").all():
+                out = out.drop(columns=[c])
+
+    return out
+
+
+def _to_per_90(series: pd.Series, minutes: pd.Series) -> pd.Series:
+    num = pd.to_numeric(series, errors="coerce")
+    mins = pd.to_numeric(minutes, errors="coerce")
+    denom = (mins / 90.0).where(mins.notna() & (mins > 0), other=pd.NA)
+    return num / denom
+
+
+def build_key_stats_view(
+    df: pd.DataFrame,
+    *,
+    per_90: bool = False,
+    use_full_names: bool = False,
+    include_uncertainty: bool = False,
+) -> pd.DataFrame:
+    """Key Stats table built from projections (requested: show projections file)."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # Requested column set (filled best-effort from live FPL bootstrap stats + our projections)
+    ot = _first_col(df, ["shots_on_target", "sot", "shots_on_tgt", "shot_on_target"])
+    bc = _first_col(df, ["big_chances", "big_chance", "big_chances_total"])
+    kp = _first_col(df, ["key_passes", "chances_created", "kp"])
+    bcc = _first_col(df, ["big_chances_created", "big_chance_created", "bcc"])
+    dc = _compute_def_contrib(df)
+
+    minutes = df.get("minutes", pd.Series(dtype=float))
+
+    view = pd.DataFrame(
+        {
+            "Name": df.get("web_name", pd.Series(dtype=str)),
+            "Club": df.get("team", pd.Series(dtype=str)),
+            "£M": df.get("price", 0),
+            "App": df.get("starts", pd.Series(dtype=float)),
+            "Mins": minutes,
+            "S": df.get("starts", pd.Series(dtype=float)),
+            "OT": ot,
+            "In": df.get("influence", pd.Series(dtype=float)),
+            "BC": bc,
+            "xG": df.get("expected_goals", pd.Series(dtype=float)),
+            "G": df.get("goals_scored", pd.Series(dtype=float)),
+            "%xGI": df.get("pct_xGI", pd.Series(dtype=float)),
+            "%GI": df.get("pct_GI", pd.Series(dtype=float)),
+            "xGI": df.get("xGI", pd.Series(dtype=float)),
+            "GI": df.get("GI", pd.Series(dtype=float)),
+            "KP": kp,
+            "BCC": bcc,
+            "xA": df.get("expected_assists", pd.Series(dtype=float)),
+            "A": df.get("assists", pd.Series(dtype=float)),
+            "DC": dc,
+            "xPts": df.get("proj_points", 0),
+            "P10": df.get("p10", pd.Series(dtype=float)) if include_uncertainty else pd.Series([pd.NA] * len(df)),
+            "P50": df.get("p50", pd.Series(dtype=float)) if include_uncertainty else pd.Series([pd.NA] * len(df)),
+            "P90": df.get("p90", pd.Series(dtype=float)) if include_uncertainty else pd.Series([pd.NA] * len(df)),
+            "BPS": df.get("bps", pd.Series(dtype=float)),
+            "B": df.get("bonus", pd.Series(dtype=float)),
+            "Pts": df.get("total_points", pd.Series(dtype=float)),
+        }
+    )
+
+    if bool(df.get("_has_minutes_prob", False).any() if "_has_minutes_prob" in df.columns else False):
+        view["Min%"] = (pd.to_numeric(df.get("minutes_prob", 0), errors="coerce").fillna(0.0) * 100.0).round(0)
+
+    # Sort default
+    if "xPts" in view.columns:
+        view = view.sort_values("xPts", ascending=False)
+
+    # Optional per-90 view (skip identifiers / price)
+    if per_90:
+        # Only convert underlying action metrics; keep point-like columns as-is.
+        do_not_convert = {"Name", "Club", "£M", "Mins", "xPts", "P10", "P50", "P90", "BPS", "B", "Pts", "Min%"}
+        for c in list(view.columns):
+            if str(c).startswith("%"):
+                do_not_convert.add(c)
+            if c in do_not_convert:
+                continue
+            view[c] = _to_per_90(view[c], view["Mins"])
+
+        # Make it obvious it is per-90
+        rename_map = {c: (f"{c}/90" if c not in do_not_convert else c) for c in view.columns}
+        view = view.rename(columns=rename_map)
+
+    # Drop columns that are fully empty (this gets rid of OT/BC/Pxx when projections file doesn't include them)
+    view = _drop_empty_columns(view, keep=["Name", "Club", "£M"])
+
+    if use_full_names:
+        view = view.rename(columns={k: v for k, v in STAT_FULL_NAMES.items() if k in view.columns})
+
+    return view
+
+
+def _fdr_colors(fdr: int) -> tuple[str, str]:
+    palette = {
+        1: ("#BFEAD2", "#0B3D2E"),
+        2: ("#D9F2E4", "#0B3D2E"),
+        3: ("#F6E7B2", "#5A4300"),
+        4: ("#F8D1B0", "#5A2A00"),
+        5: ("#F6B8B8", "#5A0000"),
+    }
     try:
-        r = get_with_retry(url, timeout=15)
-        picks = r.json().get("picks", [])
-        return pd.DataFrame(picks)
+        f = int(fdr)
     except Exception:
-        return pd.DataFrame(columns=["element", "position", "is_captain"])
+        f = 3
+    return palette.get(f, palette[3])
 
-def build_fixture_index(fixtures_df: pd.DataFrame) -> dict[int, dict[int, list[dict[str, Any]]]]:
-    """Build fixture index by team and GW."""
+
+def _read_b64(path: Path) -> str:
+    try:
+        raw = path.read_bytes()
+        return base64.b64encode(raw).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _build_fixture_index(fixtures_df: pd.DataFrame) -> dict[int, dict[int, list[dict[str, Any]]]]:
     out: dict[int, dict[int, list[dict[str, Any]]]] = {}
-    
-    if fixtures_df is None or fixtures_df.empty or "event" not in fixtures_df.columns:
+    if fixtures_df is None or fixtures_df.empty:
         return out
-    
+    if "event" not in fixtures_df.columns:
+        return out
+
     for _, r in fixtures_df.iterrows():
         try:
             gw = int(r.get("event"))
         except Exception:
             continue
-        
         th = r.get("team_h")
         ta = r.get("team_a")
         if pd.isna(th) or pd.isna(ta):
             continue
-        
         try:
             th = int(th)
             ta = int(ta)
         except Exception:
             continue
-        
-        def push(team_id: int, opp_id: int, ha: str, fdr_val: Any):
+
+        def _push(team_id: int, opp_id: int, ha: str, fdr_val: Any):
             try:
                 fdr_int = int(fdr_val) if pd.notna(fdr_val) else 3
             except Exception:
                 fdr_int = 3
-            
             team_map = out.setdefault(team_id, {})
             team_map.setdefault(gw, []).append({"opp_id": opp_id, "ha": ha, "fdr": fdr_int})
-        
-        push(th, ta, "H", r.get("team_h_difficulty"))
-        push(ta, th, "A", r.get("team_a_difficulty"))
-    
+
+        _push(th, ta, "H", r.get("team_h_difficulty"))
+        _push(ta, th, "A", r.get("team_a_difficulty"))
+
     return out
 
-def team_summary(team_df: pd.DataFrame) -> dict[str, Any]:
-    """Summarize team cost and composition."""
+
+def _render_ticker_html(
+    fixtures_index: dict[int, dict[int, list[dict[str, Any]]]],
+    gw_start: int,
+    gw_end: int,
+    only_team_ids: set[int] | None = None,
+) -> str:
+    teams = load_team_lookup()
+    team_ids = sorted(teams.keys())
+    if only_team_ids:
+        team_ids = [t for t in team_ids if t in only_team_ids]
+
+    def pill(text: str, fdr: int) -> str:
+        bg, fg = _fdr_colors(fdr)
+        return (
+            "<span style='display:inline-block;padding:3px 8px;border-radius:8px;"
+            f"background:{bg};color:{fg};font-size:12px;line-height:16px;margin:2px;white-space:nowrap'>"
+            f"{text}</span>"
+        )
+
+    cols = list(range(gw_start, gw_end + 1))
+    html = [
+        "<div style='overflow:auto'>",
+        "<table style='border-collapse:separate;border-spacing:0 6px;width:100%'>",
+        "<thead><tr>",
+        "<th style='text-align:left;padding:6px 10px;font-weight:600'>Team</th>",
+    ]
+    for gw in cols:
+        html.append(f"<th style='text-align:center;padding:6px 10px;font-weight:600'>GW{gw}</th>")
+    html.append("</tr></thead><tbody>")
+
+    for tid in team_ids:
+        recall = fixtures_index.get(tid, {})
+        t_short = teams.get(tid, {}).get("short_name") or str(tid)
+        badge = badge_path(t_short)
+        badge_html = ""
+        try:
+            if badge and Path(badge).exists():
+                badge_html = (
+                    f"<img src='{badge}' style='width:18px;height:18px;vertical-align:-3px;margin-right:6px'/>"
+                )
+        except Exception:
+            badge_html = ""
+
+        html.append("<tr>")
+        html.append(
+            "<td style='padding:6px 10px;background:#fff;border:1px solid #eee;border-radius:10px;white-space:nowrap'>"
+            f"{badge_html}{t_short}</td>"
+        )
+        for gw in cols:
+            fixtures_here = recall.get(gw, [])
+            if not fixtures_here:
+                cell = ""
+            else:
+                parts = []
+                for fx in fixtures_here:
+                    opp_short = teams.get(int(fx["opp_id"]), {}).get("short_name") or str(fx["opp_id"])
+                    parts.append(pill(f"{opp_short} ({fx['ha']})", int(fx["fdr"])))
+                cell = "".join(parts)
+
+            html.append(
+                "<td style='padding:6px 10px;background:#fff;border:1px solid #eee;border-radius:10px;text-align:center'>"
+                + (cell or "<span style='color:#bbb'>—</span>")
+                + "</td>"
+            )
+        html.append("</tr>")
+    html.append("</tbody></table></div>")
+    return "".join(html)
+
+
+def _team_summary(team_df: pd.DataFrame) -> dict[str, Any]:
     if team_df is None or team_df.empty:
         return {"cost": 0.0, "counts": Counter(), "clubs": Counter()}
-    
     cost = float(team_df.get("price", 0).fillna(0).sum()) if "price" in team_df.columns else 0.0
     counts = Counter(team_df.get("position", []).tolist())
     clubs = Counter(team_df.get("team", []).tolist())
-    
     return {"cost": cost, "counts": counts, "clubs": clubs}
 
-def derive_formation(starters_df: pd.DataFrame) -> str | None:
-    """Derive formation from starting XI."""
+
+def _derive_formation(starters_df: pd.DataFrame) -> str | None:
     if starters_df is None or starters_df.empty or "position" not in starters_df.columns:
         return None
-    
     counts = Counter(starters_df["position"].tolist())
     gk = int(counts.get("GK", 0))
     d = int(counts.get("DEF", 0))
     m = int(counts.get("MID", 0))
     f = int(counts.get("FWD", 0))
-    
     if gk != 1 or (gk + d + m + f) != 11:
         return None
-    
-    for formation, (gkn, defn, midn, fwdn) in ALLOWED_FORMATIONS.items():
-        if (gk, d, m, f) == (gkn, defn, midn, fwdn):
+    for formation, (gk_n, def_n, mid_n, fwd_n) in ALLOWED_FORMATIONS.items():
+        if (gk, d, m, f) == (gk_n, def_n, mid_n, fwd_n):
             return formation
-    
     return None
 
-def validate_starting_xi(team_df: pd.DataFrame, starter_ids: list[int]) -> tuple[bool, str, str | None]:
-    """Validate starting XI formation."""
+
+def _validate_starting_xi(team_df: pd.DataFrame, starter_ids: list[int]) -> tuple[bool, str, str | None]:
     if team_df is None or team_df.empty:
         return False, "No squad loaded", None
-    
     if len(starter_ids) != 11:
         return False, "Starting XI must have 11 players", None
-    
     starters = team_df[team_df["player_id"].astype(int).isin([int(x) for x in starter_ids])].copy()
     if starters.empty or len(starters) != 11:
         return False, "Starting XI selection contains unknown players", None
-    
+    # If we don't have position data, allow selection but skip formation validation.
     if "position" not in starters.columns:
         return True, "", None
-    
-    formation = derive_formation(starters)
+
+    formation = _derive_formation(starters)
     if not formation:
-        return False, f"Invalid formation. Use one of: {', '.join(ALLOWED_FORMATIONS.keys())}", None
-    
+        return False, "Invalid formation. Use one of: 343, 352, 451, 442, 433, 532, 541", None
     return True, "", formation
 
 
-def can_remove_from_squad(team_df: pd.DataFrame, player_id: int) -> tuple[bool, str]:
-    """True if removing this player still allows forming a valid XI from the remaining squad."""
-    if team_df is None or team_df.empty or "player_id" not in team_df.columns:
-        return False, "No squad"
-
-    try:
-        pid = int(player_id)
-    except Exception:
-        return False, "Invalid player"
-
-    remaining = team_df[team_df["player_id"].astype(int) != pid].copy()
-    if len(remaining) < 11:
-        return False, "Need at least 11 players"
-
-    try:
-        starters = best_xi_ids(remaining)
-    except Exception:
-        starters = []
-
-    if not starters or len(starters) != 11:
-        return False, "Would break valid formation"
-
-    ok, msg, _ = validate_starting_xi(remaining, starters)
-    if not ok:
-        return False, msg or "Would break valid formation"
-
-    return True, ""
-
-
-def best_valid_swap_in(team_df: pd.DataFrame, *, starter_out: int, starters_ids: list[int], bench_ids: list[int]) -> int | None:
-    """Pick a bench player to swap in for starter_out that keeps formation valid.
-
-    Returns the best bench player id by projected points, or None if no valid swap exists.
-    """
-    if team_df is None or team_df.empty:
-        return None
-    starters_set = [int(x) for x in starters_ids]
-    bench_set = [int(x) for x in bench_ids]
-
-    if int(starter_out) not in starters_set:
-        return None
-
-    best_id: int | None = None
-    best_score = -1e18
-
-    for b in bench_set:
-        new_starters = [x for x in starters_set if int(x) != int(starter_out)] + [int(b)]
-        ok, _, _ = validate_starting_xi(team_df, new_starters)
-        if not ok:
-            continue
-
-        try:
-            score = float(team_df[team_df["player_id"].astype(int).isin(new_starters)]["proj_points"].sum())
-        except Exception:
-            score = 0.0
-
-        if score > best_score:
-            best_score = score
-            best_id = int(b)
-
-    return best_id
-
-def can_add_player(team_df: pd.DataFrame, p: pd.Series) -> tuple[bool, str]:
-    """Check if player can be added to squad."""
-    if p is None or p.empty:
-        return False, "Invalid player"
-    
-    if "player_id" in p and team_df is not None and not team_df.empty and "player_id" in team_df.columns:
-        if int(p["player_id"]) in set(team_df["player_id"].astype(int).tolist()):
-            return False, "Already added"
-    
-    summary = team_summary(team_df)
-    cost = summary["cost"] + float(p.get("price", 0) or 0)
-    
-    if cost > BUDGET + 1e-9:
-        return False, "Over budget"
-    
-    if len(team_df) >= 15:
-        return False, "Squad full"
-    
-    pos = str(p.get("position", ""))
-    if pos in POS_CAP and summary["counts"].get(pos, 0) >= POS_CAP[pos]:
-        return False, f"Max {pos} reached"
-    
-    club = str(p.get("team", ""))
-    if club and summary["clubs"].get(club, 0) >= MAX_PER_CLUB:
-        return False, "Max 3 per club"
-    
-    return True, ""
-
-def best_xi_ids(team_df: pd.DataFrame) -> list[int]:
-    """Auto-select best starting XI."""
+def _best_xi_ids(team_df: pd.DataFrame) -> list[int]:
     if team_df is None or team_df.empty:
         return []
-    
     t = team_df.copy()
-    t["score"] = pd.to_numeric(t.get("proj_points", 0), errors="coerce").fillna(0.0)
-    
+    t["_score"] = pd.to_numeric(t.get("proj_points", 0), errors="coerce").fillna(0.0)
     if "position" not in t.columns:
-        return t.sort_values("score", ascending=False)["player_id"].astype(int).head(11).tolist()
-    
+        return t.sort_values("_score", ascending=False)["player_id"].astype(int).head(11).tolist()
     best: tuple[float, list[int]] = (-1e9, [])
-    
-    for _, (gkn, defn, midn, fwdn) in ALLOWED_FORMATIONS.items():
+    for _, (gk_n, def_n, mid_n, fwd_n) in ALLOWED_FORMATIONS.items():
         ids: list[int] = []
-        
-        for pos, n in [("GK", gkn), ("DEF", defn), ("MID", midn), ("FWD", fwdn)]:
-            pool = t[t["position"] == pos].sort_values("score", ascending=False).head(n)
+        for pos, n in [("GK", gk_n), ("DEF", def_n), ("MID", mid_n), ("FWD", fwd_n)]:
+            pool = t[t["position"] == pos].sort_values("_score", ascending=False).head(n)
             if len(pool) < n:
                 ids = []
                 break
             ids.extend(pool["player_id"].astype(int).tolist())
-        
         if not ids:
             continue
-        
-        score = float(t[t["player_id"].astype(int).isin(ids)]["score"].sum())
+        score = float(t[t["player_id"].astype(int).isin(ids)]["_score"].sum())
         if score > best[0]:
             best = (score, ids)
-    
     return best[1]
 
 
-def _with_last_gw_points(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-    if "last_gw_points" not in out.columns and "event_points" in out.columns:
-        out["last_gw_points"] = pd.to_numeric(out["event_points"], errors="coerce")
-    return out
+def _render_pitch_html(starters_df: pd.DataFrame, bench_df: pd.DataFrame) -> str:
+    pitch_path = Path("site") / "assets" / "pitch_vertical.svg"
+    if not pitch_path.exists():
+        pitch_path = Path("site") / "assets" / "pitch.svg"
+    b64 = _read_b64(pitch_path)
+    bg = f"data:image/svg+xml;base64,{b64}" if b64 else ""
 
+    formation = _derive_formation(starters_df)
+    gk_n, def_n, mid_n, fwd_n = ALLOWED_FORMATIONS.get(formation or "3-5-2", ALLOWED_FORMATIONS["3-5-2"])
 
-def apply_player_filters(
-    df: pd.DataFrame,
-    *,
-    q: str,
-    position: str,
-    teams: list[str],
-    price_min: float,
-    price_max: float,
-) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
+    starters = starters_df.copy() if starters_df is not None else pd.DataFrame()
+    bench = bench_df.copy() if bench_df is not None else pd.DataFrame()
+    if not starters.empty and "proj_points" in starters.columns:
+        starters = starters.sort_values("proj_points", ascending=False)
+    if not bench.empty and "proj_points" in bench.columns:
+        bench = bench.sort_values("proj_points", ascending=False)
 
-    if q:
-        name_s = out.get("web_name", pd.Series(["" for _ in range(len(out))]))
-        team_s = out.get("team", pd.Series(["" for _ in range(len(out))]))
-        out = out[
-            name_s.astype(str).str.contains(q, case=False, na=False)
-            | team_s.astype(str).str.contains(q, case=False, na=False)
-        ]
+    def badge_or_fallback(short: str) -> str:
+        p = badge_path(short)
+        try:
+            if p and Path(p).exists():
+                return f"<img src='{p}' style='width:22px;height:22px;border-radius:50%;background:#fff;padding:2px'/>"
+        except Exception:
+            pass
+        return f"<span style='display:inline-block;width:22px;height:22px;border-radius:50%;background:#fff;line-height:22px;font-size:10px;font-weight:700;color:#333'>{short[:3]}</span>"
 
-    if position and position != "ALL" and "position" in out.columns:
-        out = out[out["position"].astype(str) == position]
+    def card(row: pd.Series) -> str:
+        name = str(row.get("web_name", ""))
+        team = str(row.get("team", ""))
+        price = float(row.get("price", 0) or 0)
+        return (
+            "<div style='min-width:110px;max-width:140px;background:rgba(255,255,255,0.92);"
+            "border-radius:10px;padding:6px 8px;text-align:center;border:1px solid rgba(0,0,0,0.06)'>"
+            f"<div style='margin-bottom:4px'>{badge_or_fallback(team)}</div>"
+            f"<div style='font-weight:700;font-size:12px;line-height:14px'>{name}</div>"
+            f"<div style='font-size:11px;color:#555'>£{price:.1f}m</div>"
+            "</div>"
+        )
 
-    if teams and "team" in out.columns:
-        out = out[out["team"].isin(teams)]
+    def row_html(df: pd.DataFrame) -> str:
+        if df is None or df.empty:
+            return "<div style='display:flex;justify-content:center;gap:14px;margin:12px 0'></div>"
+        items = "".join([card(df.iloc[i]) for i in range(len(df))])
+        return f"<div style='display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin:12px 0'>{items}</div>"
 
-    if "price" in out.columns:
-        price = pd.to_numeric(out["price"], errors="coerce").fillna(0.0)
-        out = out[(price >= float(price_min)) & (price <= float(price_max))]
+    def _take(pos: str, n: int) -> pd.DataFrame:
+        if starters.empty:
+            return pd.DataFrame()
+        return starters[starters["position"] == pos].head(n)
 
-    return out
+    gk_row = row_html(_take("GK", gk_n))
+    def_row = row_html(_take("DEF", def_n))
+    mid_row = row_html(_take("MID", mid_n))
+    fwd_row = row_html(_take("FWD", fwd_n))
 
-
-def _fdr_css_from_value(fdr: object) -> str:
-    """Color fixture difficulty cells based on numeric FDR (1-5)."""
-    try:
-        f = int(fdr)
-    except Exception:
-        return ""
-
-    if f == 1:
-        return "background-color:#006400;color:white;font-weight:700;"  # dark green
-    if f == 2:
-        return "background-color:#00a65a;color:white;font-weight:700;"  # green
-    if f == 3:
-        return "background-color:#f3f4f6;color:#111827;font-weight:700;"  # pale
-    if f == 4:
-        return "background-color:#ff6b6b;color:#111827;font-weight:700;"  # red
-    if f == 5:
-        return "background-color:#8b0000;color:white;font-weight:700;"  # dark red
-    return ""
-
-# ============================================================================
-# STREAMLIT APP
-# ============================================================================
-
-st.set_page_config(
-    page_title="FPL Analytics Hub",
-    page_icon="⚽",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-st.markdown("""
-<style>
-    .main { background-color: #37003c; color: white; }
-    .stTabs [data-baseweb="tab-list"] { background-color: #37003c; }
-    .stTabs [data-baseweb="tab"] { color: white; font-weight: 600; }
-    .stTabs [aria-selected="true"] { background-color: #00ff87; color: #37003c; }
-</style>
-""", unsafe_allow_html=True)
-
-st.title("⚽ FPL Analytics Hub")
-st.caption("Professional Fantasy Premier League Planning & Predictions")
-
-# Load data
-projections = load_projections()
-
-if projections.empty:
-    st.error("No projections data found. Please add `data/projections.csv` or `outputs/projections.csv`.")
-    st.stop()
-
-# Load fixtures (prefer local, else cached network)
-if FIXTURES_JSON.exists():
-    try:
-        fixtures = load_json(FIXTURES_JSON)
-    except Exception:
-        fixtures = pd.DataFrame()
-else:
-    try:
-        st.info("📥 Loading fixtures from FPL API...")
-        payload = fetch_fixtures_json()
-        # FPL fixtures endpoint returns a list
-        fixtures = pd.DataFrame(payload) if isinstance(payload, list) else pd.DataFrame(payload.get("fixtures", []))
-        if fixtures.empty:
-            st.warning("⚠️ Fixtures loaded but empty.")
-        else:
-            st.success("✅ Fixtures loaded")
-    except Exception as e:
-        st.warning(f"⚠️ Could not load fixtures: {e}")
-        fixtures = pd.DataFrame()
-
-if not INSIGHTS_PLAYERSTATS.exists():
-    st.warning(
-        f"⚠️ Insights playerstats not found at {INSIGHTS_PLAYERSTATS}. "
-        "Advanced stats like xGC/90 will be blank until this file exists."
+    bench_items = "".join([card(bench.iloc[i]) for i in range(min(len(bench), 4))]) if not bench.empty else ""
+    bench_html = (
+        "<div style='display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:10px'>"
+        + (bench_items or "<span style='color:#eee'>Add players to see bench</span>")
+        + "</div>"
     )
 
-fixture_index = build_fixture_index(fixtures)
+    formation_html = ""
+    if formation:
+        formation_html = (
+            "<div style='text-align:center;color:#e8f5e9;font-weight:800;margin-bottom:6px'>"
+            + formation
+            + "</div>"
+        )
 
-# Raw projections table (requested: link directly to outputs file)
-projections_out = load_csv(PROJ_CSV) if PROJ_CSV.exists() else pd.DataFrame()
+    return (
+        "<div style='width:100%;border-radius:14px;overflow:hidden;border:1px solid #e6e6e6'>"
+        + f"<div style='background-image:url({bg});background-size:cover;background-position:center;"
+        + "padding:14px 10px 10px 10px;min-height:760px'>"
+        + formation_html
+        + f"{gk_row}{def_row}{mid_row}{fwd_row}"
+        + "</div>"
+        + "<div style='background:#0f2b1a;padding:10px'>"
+        + "<div style='color:#fff;font-weight:700;font-size:12px;margin-bottom:6px'>Bench</div>"
+        + f"{bench_html}"
+        + "</div></div>"
+    )
 
-# Normalize raw outputs for consistent display + filtering
-projections_out_norm = normalize_projections(projections_out) if not projections_out.empty else pd.DataFrame()
-projections_out_norm = _with_last_gw_points(projections_out_norm)
 
-projections = _with_last_gw_points(projections)
+def _render_interactive_cards(
+    *,
+    title: str,
+    team_df: pd.DataFrame,
+    starters_ids: list[int],
+    bench_ids: list[int],
+    state_prefix: str,
+    allow_remove: bool,
+    on_remove_player: Callable[[int], None] | None = None,
+) -> tuple[list[int], list[int]]:
+    if team_df is None or team_df.empty:
+        st.info("No squad loaded yet.")
+        return starters_ids, bench_ids
 
-# Sidebar
-st.sidebar.title("🎯 Filters")
+    starters_ids = [int(x) for x in starters_ids]
+    bench_ids = [int(x) for x in bench_ids]
 
-# Cache control (helps when code/data changed but Streamlit cache is stale)
-if st.sidebar.button("Clear cached data", help="Clears Streamlit caches and reruns the app"):
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-    try:
-        st.cache_resource.clear()
-    except Exception:
-        pass
-    st.sidebar.success("Cache cleared")
-    st.rerun()
+    starters_set = set(starters_ids)
+    bench_ids = [x for x in bench_ids if x not in starters_set]
 
-with st.sidebar.expander("Data health", expanded=False):
-    try:
-        _rows = int(len(projections))
-        _xgc = int(pd.to_numeric(projections.get("expected_goals_conceded_per_90"), errors="coerce").notna().sum())
-        st.caption(f"Rows: {_rows}")
-        st.caption(f"xGC/90 coverage: {_xgc}/{_rows}")
-    except Exception:
-        st.caption("(health metrics unavailable)")
+    sel_key = f"{state_prefix}_swap_sel"
+    role_key = f"{state_prefix}_swap_role"
+    st.session_state.setdefault(sel_key, None)
+    st.session_state.setdefault(role_key, None)
 
-q_sidebar = st.sidebar.text_input("Search", value="")
+    st.markdown(f"**{title}**")
+    st.caption("Swap: click 🔴↓ on a starter, then 🟢↑ on a bench player (or vice versa).")
 
-pos_sidebar = st.sidebar.selectbox(
-    "Position",
-    options=["ALL", "GK", "DEF", "MID", "FWD"],
-    index=0,
-)
+    starters_df = team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy()
+    bench_df = team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy()
 
-team_options = sorted([t for t in projections.get("team", pd.Series(dtype=str)).dropna().unique().tolist()])
-teams_sidebar = st.sidebar.multiselect("Teams", options=team_options, default=[])
+    ok, _, formation = _validate_starting_xi(team_df, starters_ids)
+    if ok and formation:
+        st.caption(f"Formation: {formation}")
 
-# Force full price range (prevents accidental caps like max=4.0)
-price_options = [round(x * 0.5, 1) for x in range(7, 31)]  # 3.5 to 15.0
-price_min_sidebar, price_max_sidebar = st.sidebar.select_slider(
-    "Price",
-    options=price_options,
-    value=(3.5, 15.0),
-)
+    def _attempt_swap(id_a: int, role_a: str, id_b: int, role_b: str):
+        nonlocal starters_ids, bench_ids
+        if role_a == role_b:
+            st.session_state[sel_key] = id_b
+            st.session_state[role_key] = role_b
+            return
 
-# Column picker for the projections/stat tables
-_base_cols = ["web_name", "team", "position", "price", "proj_points"]
-_exclude_cols = set(_base_cols + ["player_id", "last_gw_points"])
-extra_col_options = sorted([c for c in projections.columns if c not in _exclude_cols])
-extra_columns = st.sidebar.multiselect(
-    "Extra columns",
-    options=extra_col_options,
-    default=[],
-    help="Select extra features to add to tables (xG, xA, defcon, etc).",
-)
+        if role_a == "starter" and role_b == "bench":
+            new_starters = [x for x in starters_ids if x != id_a] + [id_b]
+            new_bench = [x for x in bench_ids if x != id_b] + [id_a]
+        elif role_a == "bench" and role_b == "starter":
+            new_starters = [x for x in starters_ids if x != id_b] + [id_a]
+            new_bench = [x for x in bench_ids if x != id_a] + [id_b]
+        else:
+            return
 
-# Apply sidebar filters
-projections_filtered = apply_player_filters(
-    projections,
-    q=q_sidebar,
-    position=pos_sidebar,
-    teams=teams_sidebar,
-    price_min=float(price_min_sidebar),
-    price_max=float(price_max_sidebar),
-)
-projections_out_filtered = apply_player_filters(
-    projections_out_norm,
-    q=q_sidebar,
-    position=pos_sidebar,
-    teams=teams_sidebar,
-    price_min=float(price_min_sidebar),
-    price_max=float(price_max_sidebar),
-)
+        ok2, msg2, _ = _validate_starting_xi(team_df, new_starters)
+        if ok2:
+            starters_ids = new_starters
+            bench_ids = new_bench
+            st.session_state[sel_key] = None
+            st.session_state[role_key] = None
+            st.rerun()
+        else:
+            st.error(msg2)
 
-# Tabs
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 Projected Points",
-    "🏆 My Team",
-    "📅 Fixture Difficulty",
-    "📈 Key Stats",
-    "🔄 Transfer Planner",
-    "🎯 Differentials",
-    "📉 Player Analysis",
-])
+    def _render_player_card(r: pd.Series, role: str):
+        pid = int(r.get("player_id"))
+        picked = (st.session_state.get(sel_key) == pid) and (st.session_state.get(role_key) == role)
 
-with tab1:
-    st.header("📊 Player Projections")
+        a, b, c = st.columns([1, 10, 1])
+        with a:
+            if role == "starter":
+                if st.button("🔴↓", key=f"{state_prefix}_down_{pid}", help="Select starter to bench"):
+                    sel = st.session_state.get(sel_key)
+                    sel_role = st.session_state.get(role_key)
+                    if sel is None:
+                        st.session_state[sel_key] = pid
+                        st.session_state[role_key] = "starter"
+                        st.rerun()
+                    else:
+                        _attempt_swap(int(sel), str(sel_role), pid, "starter")
+            else:
+                if st.button("🟢↑", key=f"{state_prefix}_up_{pid}", help="Select bench to start"):
+                    sel = st.session_state.get(sel_key)
+                    sel_role = st.session_state.get(role_key)
+                    if sel is None:
+                        st.session_state[sel_key] = pid
+                        st.session_state[role_key] = "bench"
+                        st.rerun()
+                    else:
+                        _attempt_swap(int(sel), str(sel_role), pid, "bench")
 
-    if projections_out.empty:
-        st.error("No projections data found in outputs/projections.csv")
-        st.stop()
+        with b:
+            team_code = r.get("team_code")
+            team_code_num = None
+            try:
+                if team_code is not None and str(team_code) != "":
+                    team_code_num = int(float(team_code))
+            except Exception:
+                team_code_num = None
 
-    st.caption("Showing outputs/projections.csv (normalized) + uncertainty/reasons (from diagnostics + FPL stats)")
+            photo_url = get_player_photo_url(pid) if pid else "https://via.placeholder.com/80x80?text=N%2FA"
+            badge_url = get_team_badge_url(team_code_num) if team_code_num else ""
 
-    # Use outputs file as base (it contains per-GW columns), then enrich from full projections.
-    df1 = projections_out_filtered.copy()
-    if "player_id" in df1.columns and "player_id" in projections_filtered.columns:
-        enrich_cols = [
-            "player_id",
-            "team_id",
-            "expected_goal_involvements_per_90",
-            "expected_goals_per_90",
-            "expected_assists_per_90",
-            "expected_goals_conceded_per_90",
-            "threat",
-            "creativity",
-            "defcon_points",
-            "role",
-            "selected_by_percent",
-        ]
-        enrich_cols = [c for c in enrich_cols if c in projections_filtered.columns]
-        if enrich_cols:
-            df1 = df1.merge(
-                projections_filtered[enrich_cols].drop_duplicates(subset=["player_id"]).copy(),
-                on="player_id",
-                how="left",
-                suffixes=("", "_enriched"),
+            badge_fallback = r.get("badge")
+            badge_html = ""
+            if badge_url:
+                fallback_src = str(badge_fallback or "")
+                badge_html = (
+                    f"<img src='{badge_url}' style='width:22px;height:22px;vertical-align:-5px;margin-right:8px' "
+                    f"onerror=\"this.src='{fallback_src}'\"/>"
+                )
+            else:
+                try:
+                    if badge_fallback and Path(str(badge_fallback)).exists():
+                        badge_html = f"<img src='{badge_fallback}' style='width:22px;height:22px;vertical-align:-5px;margin-right:8px'/>"
+                except Exception:
+                    badge_html = ""
+
+            border = "2px solid #16a34a" if picked else "1px solid rgba(0,0,0,0.08)"
+            st.markdown(
+                "<div style='background:#fff;border-radius:14px;padding:12px 12px;margin:10px 0;"
+                "box-shadow:0 6px 14px rgba(0,0,0,0.10);"
+                f"border:{border}'>"
+                "<div style='display:flex;align-items:center;gap:12px'>"
+                f"<img src='{photo_url}' style='width:54px;height:54px;border-radius:50%;object-fit:cover;"
+                "border:3px solid #00ff87;background:#f3f4f6' "
+                "onerror=\"this.src='https://via.placeholder.com/80x80?text=N%2FA'\"/>"
+                "<div style='flex:1'>"
+                f"<div style='font-weight:900;font-size:14px;color:#111'>{r.get('web_name')}</div>"
+                f"<div style='color:#6b7280;font-size:12px'>{badge_html}{r.get('team')} · {r.get('position')}</div>"
+                "<div style='margin-top:6px;display:flex;justify-content:space-between;align-items:center'>"
+                f"<span style='font-weight:800;color:#111'>£{float(r.get('price',0) or 0):.1f}m</span>"
+                f"<span style='font-weight:800;color:#065f46;background:rgba(0,255,135,0.20);padding:2px 8px;border-radius:999px;font-size:12px'>"
+                f"Pred {float(r.get('proj_points',0) or 0):.1f}"
+                "</span>"
+                "</div>"
+                "</div>"
+                "</div>"
+                "</div>",
+                unsafe_allow_html=True,
             )
 
-    # Attach uncertainty + reasons
-    df1 = attach_uncertainty(df1)
-    df1 = attach_reason_codes(df1, fixture_index=fixture_index, gw=23)
+        with c:
+            if allow_remove:
+                if st.button("❌", key=f"{state_prefix}_rm_{pid}", help="Remove from squad"):
+                    if on_remove_player:
+                        on_remove_player(pid)
+                    st.rerun()
+            else:
+                st.button("✖", key=f"{state_prefix}_rm_disabled_{pid}", disabled=True)
 
-    # Delta vs replacement (4.5m baseline by position)
-    baseline: dict[str, float] = {}
-    if "price" in df1.columns and "position" in df1.columns and "proj_points" in df1.columns:
-        for pos in ["GK", "DEF", "MID", "FWD"]:
-            pool = df1[(df1["position"].astype(str) == pos) & (pd.to_numeric(df1["price"], errors="coerce").fillna(0.0) <= 4.5)]
-            if pool.empty:
-                continue
-            baseline[pos] = float(pd.to_numeric(pool["proj_points"], errors="coerce").fillna(0.0).quantile(0.75))
-        df1["delta_vs_4.5"] = df1.apply(lambda r: float(pd.to_numeric(r.get("proj_points"), errors="coerce") or 0.0) - float(baseline.get(str(r.get("position")), 0.0)), axis=1)
+    st.markdown("### Starters")
+    starter_sort_cols = [c for c in ["position", "proj_points"] if c in starters_df.columns]
+    starters_view = starters_df.sort_values(starter_sort_cols, ascending=[True, False][: len(starter_sort_cols)]) if starter_sort_cols else starters_df
+    for _, r in starters_view.iterrows():
+        _render_player_card(r, "starter")
 
-    # Price trend (LiveFPL predictor)
-    if "player_id" in df1.columns:
-        ids = (
-            pd.to_numeric(df1["player_id"], errors="coerce")
-            .dropna()
-            .astype(int)
-            .unique()
-            .tolist()
-        )
-        ids_key = tuple(sorted([int(x) for x in ids]))
-        trend_map = compute_livefpl_trend_map(ids_key) if ids_key else {}
-        df1["price_trend"] = pd.to_numeric(df1["player_id"], errors="coerce").map(
-            lambda pid: trend_map.get(int(pid), "n/a") if pd.notna(pid) else "n/a"
-        )
+    st.markdown("### Bench")
+    bench_sort_cols = [c for c in ["position", "proj_points"] if c in bench_df.columns]
+    bench_view = bench_df.sort_values(bench_sort_cols, ascending=[True, False][: len(bench_sort_cols)]) if bench_sort_cols else bench_df
+    for _, r in bench_view.iterrows():
+        _render_player_card(r, "bench")
 
-    # Per-GW columns if present
-    gw_cols = [c for c in df1.columns if str(c).startswith("GW") and str(c).endswith("_proj_points")]
-    gw_cols = sorted(gw_cols, key=lambda c: int(re.findall(r"\d+", c)[0]) if re.findall(r"\d+", c) else 999)
-    gw_cols_show = st.multiselect(
-        "Per-GW columns",
-        options=gw_cols,
-        default=gw_cols,
-        help="These come from outputs/projections.csv",
+    if st.button("Clear swap selection", key=f"{state_prefix}_clear_sel"):
+        st.session_state[sel_key] = None
+        st.session_state[role_key] = None
+        st.rerun()
+
+    return starters_ids, bench_ids
+
+
+def _can_add_player(team_df: pd.DataFrame, p: pd.Series) -> tuple[bool, str]:
+    if p is None or p.empty:
+        return False, "Invalid player"
+    if "player_id" in p and team_df is not None and not team_df.empty and "player_id" in team_df.columns:
+        if int(p["player_id"]) in set(team_df["player_id"].astype(int).tolist()):
+            return False, "Already added"
+
+    summary = _team_summary(team_df)
+    cost = summary["cost"] + float(p.get("price", 0) or 0)
+    if cost > BUDGET + 1e-9:
+        return False, "Over budget"
+    if len(team_df) >= 15:
+        return False, "Squad full"
+
+    pos = str(p.get("position", ""))
+    if pos in POS_CAP and summary["counts"].get(pos, 0) >= POS_CAP[pos]:
+        return False, f"Max {pos} reached"
+
+    club = str(p.get("team", ""))
+    if club and summary["clubs"].get(club, 0) >= MAX_PER_CLUB:
+        return False, "Max 3 per club"
+
+    return True, ""
+
+
+def load_projections() -> pd.DataFrame:
+    # Prefer outputs/projections.csv (your model output)
+    if PROJ_CSV_INTERNAL.exists():
+        return load_csv(PROJ_CSV_INTERNAL)
+    if PROJ_CSV.exists():
+        return load_csv(PROJ_CSV)
+    if PROJ_JSON.exists():
+        return load_json(PROJ_JSON)
+    return load_csv(PROJ_CSV_FALLBACK)
+
+
+def main():
+    st.set_page_config(
+        page_title="FPL Analytics Hub",
+        page_icon="⚽",
+        layout="wide",
+        initial_sidebar_state="expanded",
     )
 
-    preferred = [
-        "web_name",
-        "team",
-        "position",
-        "price",
-        "price_trend",
-        "proj_points",
-        "proj_p25",
-        "proj_p75",
-        "delta_vs_4.5",
-        "fixtures_next3",
-        "why",
-        *gw_cols_show,
-        *[c for c in extra_columns if c in df1.columns],
-    ]
-    cols = [c for c in preferred if c in df1.columns]
-    df1 = df1[cols]
-
-    df1 = df1.rename(
-        columns={
-            "web_name": "player",
-            "proj_points": "proj",
-            "proj_p25": "p25",
-            "proj_p75": "p75",
-        }
-    )
-
-    col_config = {
-        "price": st.column_config.NumberColumn("£", format="%.1f"),
-        "price_trend": st.column_config.TextColumn("Trend", width="small"),
-        "proj": st.column_config.NumberColumn("Proj", format="%.2f"),
-        "p25": st.column_config.NumberColumn("P25", format="%.2f"),
-        "p75": st.column_config.NumberColumn("P75", format="%.2f"),
-        "delta_vs_4.5": st.column_config.NumberColumn("Δ vs 4.5", format="%.2f"),
-        "fixtures_next3": st.column_config.TextColumn("Next (3)", width="medium"),
-        "why": st.column_config.TextColumn("Why", width="large"),
+    st.markdown(
+        """
+<style>
+    :root {
+        --fpl-purple: #37003c;
+        --fpl-green: #00ff87;
+        --fpl-pink: #ff2882;
     }
-    for c in gw_cols_show:
-        col_config[c] = st.column_config.NumberColumn(c.replace("_proj_points", ""), format="%.2f")
-
-    st.dataframe(
-        df1.sort_values("proj", ascending=False) if "proj" in df1.columns else df1,
-        width="stretch",
-        height=600,
-        column_config=col_config,
-        hide_index=True,
+    .block-container { padding-top: 1.2rem; }
+    .header-container {
+        background: linear-gradient(135deg, var(--fpl-purple) 0%, var(--fpl-green) 100%);
+        padding: 18px 16px;
+        border-radius: 14px;
+        margin: 0 0 18px 0;
+        text-align: center;
+        color: white;
+    }
+    .header-container h1 { margin: 0; font-size: 2.0rem; font-weight: 800; }
+    .header-container p { margin: 6px 0 0 0; opacity: 0.9; }
+</style>
+""",
+        unsafe_allow_html=True,
     )
 
-    st.download_button(
-        "Download projections.csv",
-        data=PROJ_CSV.read_bytes() if PROJ_CSV.exists() else b"",
-        file_name="projections.csv",
-        mime="text/csv",
-        disabled=not PROJ_CSV.exists(),
+    st.markdown(
+        """
+<div class="header-container">
+    <h1>⚽ FPL Analytics Hub</h1>
+    <p>Professional Fantasy Premier League Planning & Predictions</p>
+</div>
+""",
+        unsafe_allow_html=True,
     )
 
-with tab2:
-    st.header("🏆 My Team Builder")
-    
-    # Initialize session state
-    if "my_team_df" not in st.session_state:
-        st.session_state.my_team_df = pd.DataFrame()
-    
-    if "starters_ids" not in st.session_state:
-        st.session_state.starters_ids = []
-    
-    if "bench_ids" not in st.session_state:
-        st.session_state.bench_ids = []
-    
-    # Load team from FPL
-    col1, col2, col3 = st.columns([2, 2, 1])
-    
-    with col1:
-        entry_id_input = st.text_input("FPL Entry ID", value=str(ENTRY_ID))
-    
-    with col2:
-        gw_input = st.text_input("Gameweek", value=str(GW))
-    
-    with col3:
-        if st.button("🔄 Load Team"):
-            picks_df = get_my_team(int(entry_id_input), int(gw_input))
-            
-            if not picks_df.empty:
-                # Merge with projections
-                team_ids = picks_df["element"].tolist()
-                team_df = projections[projections["player_id"].isin(team_ids)].copy()
-                
-                st.session_state.my_team_df = team_df
-                
-                # Auto-select starting XI
-                starters = best_xi_ids(team_df)
-                st.session_state.starters_ids = starters
-                st.session_state.bench_ids = [int(x) for x in team_df["player_id"] if int(x) not in starters]
-                
-                st.success(f"Loaded {len(team_df)} players!")
-                st.rerun()
-    
-    # Display team
-    team_df = st.session_state.my_team_df
-    
-    if not team_df.empty:
-        summary = team_summary(team_df)
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Players", len(team_df))
-        with col2:
-            st.metric("Total Cost", f"${summary['cost']:.1f}")
-        with col3:
-            st.metric("Projected Points", f"{team_df['proj_points'].sum():.1f}")
-        
-        # Formation validation (silent enforcement; only warn if XI is incomplete)
-        starters_count = len(st.session_state.starters_ids)
-        ok, msg, formation = validate_starting_xi(team_df, st.session_state.starters_ids)
-        if ok and formation:
-            st.success(f"Formation: {formation}")
-        elif msg and starters_count != 11:
-            st.warning(msg)
-        
-        starters_ids = [int(x) for x in st.session_state.starters_ids]
-        bench_ids = [int(x) for x in st.session_state.bench_ids]
+    # Load data
+    projections = load_projections()
+    fixtures = load_json(FIXTURES_JSON) if FIXTURES_JSON.exists() else pd.DataFrame()
 
-        starters_df = team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy()
-        bench_df = team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy()
+    # Normalize base identifiers (player_id/web_name) first
+    projections = normalize_projections(projections)
 
-        st.subheader("Starting XI")
-        # Render kit images + bench buttons (disabled if no valid swap exists)
-        for pos in ["GK", "DEF", "MID", "FWD"]:
-            pos_players = starters_df[starters_df.get("position", "") == pos].copy()
-            if pos_players.empty:
-                continue
-            st.markdown(f"**{pos}**")
-            cols = st.columns(len(pos_players))
-            for idx, (_, player) in enumerate(pos_players.iterrows()):
-                with cols[idx]:
-                    pid = int(player.get("player_id"))
-                    team_code = player.get("team_code", 0)
-                    col_a, col_b = st.columns([1, 2])
-                    with col_a:
-                        if pd.notna(team_code) and int(team_code) > 0:
-                            st.image(get_shirt_url(int(team_code)), width=60)
-                    with col_b:
-                        if pd.notna(pid):
-                            st.image(get_player_photo_url(int(pid)), width=50)
-                    st.caption(str(player.get("web_name", "")))
-                    st.caption(f"${float(player.get('price', 0) or 0):.1f}")
+    # Enrich with live FPL stats (adds element_type, now_cost, team id, etc.)
+    projections = enrich_with_fpl_stats(projections)
 
-                    swap_in = best_valid_swap_in(team_df, starter_out=pid, starters_ids=starters_ids, bench_ids=bench_ids)
-                    disabled = swap_in is None
-                    help_txt = "Cannot bench (would break formation)" if disabled else ""
-                    if st.button("Bench", key=f"bench_{pid}", disabled=disabled, help=help_txt):
-                        # swap out this starter with the best valid bench player
-                        st.session_state.starters_ids = [x for x in starters_ids if int(x) != pid] + [int(swap_in)]
-                        st.session_state.bench_ids = [x for x in bench_ids if int(x) != int(swap_in)] + [pid]
-                        st.rerun()
+    # Enrich with FPL-Core-Insights playerstats (tackles/CBI/recoveries/defcon + per-90 columns)
+    projections = enrich_with_insights_playerstats(projections, season=DEFAULT_INSIGHTS_SEASON)
 
-        st.subheader("Bench")
-        if bench_df.empty:
-            st.info("Bench is empty")
-        else:
-            bench_view = bench_df[[c for c in ["web_name", "team", "position", "price", "proj_points"] if c in bench_df.columns]].copy()
-            if "price" in bench_view.columns:
-                bench_view["price"] = bench_view["price"].apply(lambda v: f"${float(v):.1f}" if pd.notna(v) else "")
-            st.dataframe(bench_view, width="stretch")
+    # Normalize again so derived fields (team/position/price/proj_points) are populated
+    projections = normalize_projections(projections)
 
-        st.markdown("### Quick Swap")
-        if not starters_df.empty and not bench_df.empty:
-            c1, c2, c3 = st.columns([2, 2, 1])
-            starter_options = [(int(p["player_id"]), str(p.get("web_name", ""))) for _, p in starters_df.iterrows() if pd.notna(p.get("player_id"))]
-            bench_options = [(int(p["player_id"]), str(p.get("web_name", ""))) for _, p in bench_df.iterrows() if pd.notna(p.get("player_id"))]
+    # Enrich with Opta-style stats (optional BYO)
+    projections = enrich_with_opta_stats(projections)
 
-            with c1:
-                starter_to_swap = st.selectbox(
-                    "Starter",
-                    options=starter_options,
-                    format_func=lambda x: x[1],
+    tabs = st.tabs(["My Team", "Projections", "Fixture Ticker", "Key Stats", "Player Profile", "Transfer Planner"])
+
+    # Tab: My Team
+    with tabs[0]:
+        st.subheader("My Team")
+        c_id, c_gw = st.columns([1, 1])
+        with c_id:
+            entry_id = int(
+                st.number_input(
+                    "Entry ID",
+                    min_value=1,
+                    value=int(st.session_state.get("entry_id", ENTRY_ID)),
+                    step=1,
                 )
-            with c2:
-                bench_to_swap = st.selectbox(
-                    "Bench",
-                    options=bench_options,
-                    format_func=lambda x: x[1],
+            )
+        with c_gw:
+            gw = int(
+                st.number_input(
+                    "Gameweek",
+                    min_value=1,
+                    max_value=38,
+                    value=int(st.session_state.get("gw", GW)),
+                    step=1,
                 )
-            new_starters = [x for x in starters_ids if int(x) != int(starter_to_swap[0])] + [int(bench_to_swap[0])]
-            can_swap, swap_msg, _ = validate_starting_xi(team_df, new_starters)
-            with c3:
-                if st.button("⇄ Swap", disabled=not can_swap, help=(swap_msg if not can_swap else "")):
-                    st.session_state.starters_ids = new_starters
-                    st.session_state.bench_ids = [x for x in bench_ids if int(x) != int(bench_to_swap[0])] + [int(starter_to_swap[0])]
+            )
+
+        st.session_state.entry_id = entry_id
+        st.session_state.gw = gw
+
+        picks = get_my_team(entry_id, gw)
+        if not picks.empty and "element" in picks.columns and not projections.empty:
+            el_ids = pd.to_numeric(picks["element"], errors="coerce").dropna().astype(int).tolist()
+
+            team_df = projections[projections["player_id"].astype(int).isin(el_ids)].copy()
+            team_df["__order"] = team_df["player_id"].apply(
+                lambda x: el_ids.index(int(x)) if int(x) in el_ids else 999
+            )
+            team_df = team_df.sort_values("__order").drop(columns=["__order"])
+
+            if not team_df.empty:
+                my_key = f"{entry_id}:{gw}"
+                if st.session_state.get("my_team_key") != my_key:
+                    st.session_state.my_team_key = my_key
+                    starters_ids = pd.to_numeric(picks[picks["position"] <= 11]["element"], errors="coerce").dropna().astype(int).tolist()
+                    bench_ids = pd.to_numeric(picks[picks["position"] > 11]["element"], errors="coerce").dropna().astype(int).tolist()
+                    st.session_state.my_starters_ids = starters_ids
+                    st.session_state.my_bench_ids = bench_ids
+
+                if st.button("Reset to FPL lineup", key="my_reset"):
+                    st.session_state.my_starters_ids = pd.to_numeric(
+                        picks[picks["position"] <= 11]["element"], errors="coerce"
+                    ).dropna().astype(int).tolist()
+                    st.session_state.my_bench_ids = pd.to_numeric(
+                        picks[picks["position"] > 11]["element"], errors="coerce"
+                    ).dropna().astype(int).tolist()
                     st.rerun()
 
-        st.markdown("### 👑 Captaincy Ranking")
-        if not team_df.empty and starters_ids:
-            starters_df_xi = team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy()
-            if not starters_df_xi.empty:
-                starters_df_xi["captain_score"] = (
-                    pd.to_numeric(starters_df_xi.get("proj_points", 0), errors="coerce").fillna(0) * 1.0
-                    + pd.to_numeric(starters_df_xi.get("expected_goals_per_90", 0), errors="coerce").fillna(0) * 10
-                    + pd.to_numeric(starters_df_xi.get("expected_assists_per_90", 0), errors="coerce").fillna(0) * 5
+                starters_ids = [int(x) for x in st.session_state.get("my_starters_ids", el_ids[:11])]
+                bench_ids = [int(x) for x in st.session_state.get("my_bench_ids", el_ids[11:])]
+
+                starters_ids, bench_ids = _render_interactive_cards(
+                    title="My Team swaps",
+                    team_df=team_df,
+                    starters_ids=starters_ids,
+                    bench_ids=bench_ids,
+                    state_prefix="my",
+                    allow_remove=False,
                 )
-                for idx, (_, p) in enumerate(starters_df_xi.nlargest(5, "captain_score").iterrows(), 1):
-                    st.write(
-                        f"{idx}. **{p.get('web_name','')}** ({p.get('team','')}) "
-                        f"→ {float(p.get('captain_score',0) or 0):.1f}"
-                    )
-    else:
-        st.info("No squad loaded yet. Enter your FPL Entry ID and click 'Load Team'.")
+                st.session_state.my_starters_ids = starters_ids
+                st.session_state.my_bench_ids = bench_ids
 
-with tab3:
-    st.header("📅 Fixture Difficulty Ticker")
+                starters_df = team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy()
+                bench_df = team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy()
+                st.markdown(_render_pitch_html(starters_df, bench_df), unsafe_allow_html=True)
 
-    if fixtures.empty or not fixture_index:
-        st.error("Fixtures could not be loaded from file or FPL API.")
-    else:
-        teams_lookup = load_team_lookup()
-        team_ids = sorted(teams_lookup.keys()) if teams_lookup else sorted(fixture_index.keys())
-
-        # GW range
-        try:
-            gw_series = pd.to_numeric(fixtures.get("event"), errors="coerce") if "event" in fixtures.columns else pd.Series(dtype=float)
-            gw_min = int(gw_series.dropna().min()) if not gw_series.dropna().empty else 1
-            gw_max = int(gw_series.dropna().max()) if not gw_series.dropna().empty else 38
-        except Exception:
-            gw_min, gw_max = 1, 38
-
-        # Start from GW23 (previous gameweeks finished)
-        gw_min_ui = max(int(gw_min), 23)
-        if gw_min_ui > gw_max:
-            gw_min_ui = int(gw_min)
-
-        gw_start_default = gw_min_ui
-        gw_end_default = min(gw_min_ui + 5, int(gw_max))
-        gw_start, gw_end = st.slider(
-            "Gameweek Range",
-            min_value=int(gw_min_ui),
-            max_value=int(gw_max),
-            value=(int(gw_start_default), int(gw_end_default)),
-        )
-
-        score_mode = st.selectbox(
-            "Team difficulty score",
-            options=["Total FDR"],
-            index=0,
-            help="Lower is easier. Computed from fixture difficulty (1-5) across the selected gameweeks.",
-        )
-
-
-
-        rows = []
-        fdr_rows = []
-        for tid in team_ids:
-            label = team_short_name(tid)
-            row = {"Team": label}
-            fdr_row = {"Team": label}
-            for gw in range(int(gw_start), int(gw_end) + 1):
-                fx_list = (fixture_index.get(int(tid), {}) or {}).get(int(gw), [])
-                if not fx_list:
-                    row[f"GW{gw}"] = "—"
-                    fdr_row[f"GW{gw}"] = pd.NA
-                    continue
-
-                cells = []
-                fdr_vals: list[int] = []
-                for fx in fx_list:
-                    opp = team_short_name(fx.get("opp_id"))
-                    ha = fx.get("ha")
-                    fdr = fx.get("fdr")
-                    # Display format: OPP (H/A). Don't show the difficulty number.
-                    cells.append(f"{opp} ({ha})")
-                    try:
-                        if fdr is not None and pd.notna(fdr):
-                            fdr_vals.append(int(fdr))
-                    except Exception:
-                        pass
-
-                row[f"GW{gw}"] = ", ".join(cells)
-                fdr_row[f"GW{gw}"] = max(fdr_vals) if fdr_vals else pd.NA
-            rows.append(row)
-            fdr_rows.append(fdr_row)
-
-        ticker_df = pd.DataFrame(rows)
-        ticker_fdr_df = pd.DataFrame(fdr_rows)
-        gw_cols = [c for c in ticker_df.columns if str(c).startswith("GW")]
-
-        # Compute per-team difficulty score so users can quickly see easiest runs.
-        if gw_cols:
-            fdr_numeric = ticker_fdr_df[gw_cols].apply(lambda s: pd.to_numeric(s, errors="coerce"))
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric("Total Cost", f"£{float(team_df.get('price', 0).fillna(0).sum()):.1f}m")
+                with c2:
+                    st.metric("Projected Points", f"{float(team_df.get('proj_points', 0).fillna(0).sum()):.1f}")
+            else:
+                st.info("No matching projection rows for your picks.")
         else:
-            fdr_numeric = pd.DataFrame(index=ticker_df.index)
+            st.info("Could not fetch picks from FPL API. Ensure entry ID and GW are correct.")
 
-        if score_mode == "Total FDR":
-            team_score = fdr_numeric.sum(axis=1, skipna=True)
+    # Tab: Projections
+    with tabs[1]:
+        st.subheader("Player Projections")
+        if projections.empty:
+            st.warning("No projections available.")
         else:
-            team_score = fdr_numeric.sum(axis=1, skipna=True)
+            clubs = sorted(projections.get("team", pd.Series(dtype=str)).dropna().unique().tolist())
+            positions = sorted(projections.get("position", pd.Series(dtype=str)).dropna().unique().tolist())
 
-        score_col = score_mode.replace(" ", "_").lower()
-        ticker_df.insert(1, score_col, team_score.round(2))
-
-        # Sort and filter to show easiest teams first.
-        ticker_df = ticker_df.sort_values(score_col, ascending=True, na_position="last")
-        ticker_fdr_df = ticker_fdr_df.loc[ticker_df.index]
-        fdr_numeric = fdr_numeric.loc[ticker_df.index] if not fdr_numeric.empty else fdr_numeric
-
-        ticker_fdr_df = ticker_fdr_df.loc[ticker_df.index]
-        fdr_numeric = fdr_numeric.loc[ticker_df.index] if not fdr_numeric.empty else fdr_numeric
-
-        def _style_all(_: pd.DataFrame) -> pd.DataFrame:
-            styles = pd.DataFrame("", index=ticker_df.index, columns=ticker_df.columns)
-            for c in gw_cols:
-                if not fdr_numeric.empty and c in fdr_numeric.columns:
-                    styles[c] = fdr_numeric[c].apply(_fdr_css_from_value)
-            return styles
-
-        st.dataframe(
-            ticker_df.style.apply(_style_all, axis=None),
-            width="stretch",
-            height=600,
-        )
-
-with tab4:
-    st.header("📈 Key Player Statistics (FPL Official Stats)")
-
-    fpl_stats = load_bootstrap_elements()
-    if fpl_stats.empty:
-        st.error("Could not load FPL stats")
-    else:
-        stats_cols = [
-            "web_name",
-            "team",
-            "element_type",
-            "now_cost",
-            "selected_by_percent",
-            "total_points",
-            "minutes",
-            "goals_scored",
-            "assists",
-            "clean_sheets",
-            "expected_goals_per_90",
-            "expected_assists_per_90",
-            "expected_goal_involvements_per_90",
-            "influence",
-            "creativity",
-            "threat",
-            "ict_index",
-            "form",
-        ]
-        stats_cols = [c for c in stats_cols if c in fpl_stats.columns]
-        df_stats = fpl_stats[stats_cols].copy()
-
-        # Map team id to short name
-        if "team" in df_stats.columns:
-            df_stats["team"] = df_stats["team"].map(team_short_name)
-
-        # Map element_type to position
-        POS_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-        if "element_type" in df_stats.columns:
-            df_stats["position"] = df_stats["element_type"].map(POS_MAP)
-            df_stats = df_stats.drop(columns=["element_type"])
-
-        # Convert now_cost (tenths) to price
-        if "now_cost" in df_stats.columns:
-            df_stats["price"] = pd.to_numeric(df_stats["now_cost"], errors="coerce").fillna(0.0) / 10.0
-            df_stats = df_stats.drop(columns=["now_cost"])
-
-        if "selected_by_percent" in df_stats.columns:
-            df_stats = df_stats.rename(columns={"selected_by_percent": "selected_by_%"})
-
-        # Apply sidebar filters
-        df_stats = apply_player_filters(
-            df_stats,
-            q=q_sidebar,
-            position=pos_sidebar,
-            teams=teams_sidebar,
-            price_min=float(price_min_sidebar),
-            price_max=float(price_max_sidebar),
-        )
-
-        # Formatting
-        fmt = {
-            "price": lambda v: f"${float(v):.1f}" if pd.notna(v) else "",
-            "selected_by_%": lambda v: f"{float(v):.1f}%" if pd.notna(v) else "",
-        }
-        st.dataframe(df_stats.style.format(fmt), width="stretch", height=600)
-
-with tab5:
-    st.header("🔄 Transfer Planner")
-
-    st.caption("Squad rules enforced: $100.0 budget · Max 3 per club · 2 GK / 5 DEF / 5 MID / 3 FWD (15 total)")
-
-    if projections.empty:
-        st.error("No projections loaded.")
-        st.stop()
-
-    if "team_ids" not in st.session_state:
-        st.session_state.team_ids = []
-    if "tp_starters_ids" not in st.session_state:
-        st.session_state.tp_starters_ids = []
-    if "tp_bench_ids" not in st.session_state:
-        st.session_state.tp_bench_ids = []
-
-    # Seed from My Team if available
-    if (not st.session_state.team_ids) and ("my_team_df" in st.session_state) and (not st.session_state.my_team_df.empty):
-        try:
-            st.session_state.team_ids = [int(x) for x in st.session_state.my_team_df["player_id"].dropna().astype(int).tolist()]
-        except Exception:
-            st.session_state.team_ids = []
-
-    # Record baseline squad once (used for transfer/hits calculator)
-    if "tp_base_team_ids" not in st.session_state and len(st.session_state.team_ids) == 15:
-        st.session_state.tp_base_team_ids = [int(x) for x in st.session_state.team_ids]
-
-    if st.session_state.team_ids and "player_id" in projections.columns:
-        team_df = projections[projections["player_id"].astype("Int64").isin([int(x) for x in st.session_state.team_ids])].copy()
-    else:
-        team_df = projections.head(0).copy() if not projections.empty else pd.DataFrame()
-
-    # Auto-pick starters/bench
-    if (not team_df.empty) and (len(team_df) >= 11) and (not st.session_state.tp_starters_ids):
-        starters = best_xi_ids(team_df)
-        st.session_state.tp_starters_ids = starters
-        st.session_state.tp_bench_ids = [
-            int(x)
-            for x in team_df["player_id"].astype(int).tolist()
-            if int(x) not in set(int(s) for s in starters)
-        ]
-
-    def _remove_from_planner(pid: int):
-        st.session_state.team_ids = [x for x in st.session_state.team_ids if int(x) != int(pid)]
-        st.session_state.tp_starters_ids = [x for x in st.session_state.tp_starters_ids if int(x) != int(pid)]
-        st.session_state.tp_bench_ids = [x for x in st.session_state.tp_bench_ids if int(x) != int(pid)]
-
-    left, right = st.columns([1.3, 1.0], gap="large")
-    with left:
-        # First-load helper (so users don't have to visit My Team first)
-        with st.expander("📥 Load squad from FPL entry", expanded=("my_team_df" not in st.session_state) or st.session_state.my_team_df.empty):
-            c1, c2, c3 = st.columns([2, 2, 1])
+            c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
-                tp_entry_id = st.text_input("FPL Entry ID", value=str(ENTRY_ID), key="tp_entry_id")
+                pos = st.selectbox("Position", ["All"] + positions)
             with c2:
-                tp_gw = st.text_input("Gameweek", value=str(GW), key="tp_gw")
+                club = st.selectbox("Club", ["All"] + clubs)  # requested club filter
             with c3:
-                if st.button("🔄 Load", key="tp_load_team"):
-                    picks_df = get_my_team(int(tp_entry_id), int(tp_gw))
-                    if not picks_df.empty:
-                        team_ids = picks_df["element"].tolist()
-                        team_loaded = projections[projections["player_id"].isin(team_ids)].copy()
-                        st.session_state.my_team_df = team_loaded
-                        st.session_state.team_ids = [int(x) for x in team_loaded["player_id"].dropna().astype(int).tolist()]
-                        st.session_state.tp_starters_ids = []
-                        st.session_state.tp_bench_ids = []
-                        st.rerun()
+                price_opts = price_options_from_proj(projections)
+                price_min = st.selectbox("Price min", options=price_opts, index=0)
+                price_max = st.selectbox("Price max", options=price_opts, index=len(price_opts) - 1)
 
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.subheader("Your squad")
-        with col2:
-            if ("my_team_df" in st.session_state) and (not st.session_state.my_team_df.empty):
-                if st.button("📥 Import from My Team"):
-                    try:
-                        st.session_state.team_ids = [
-                            int(x) for x in st.session_state.my_team_df["player_id"].tolist()
-                        ]
-                        st.session_state.tp_starters_ids = []
-                        st.session_state.tp_bench_ids = []
-                        st.rerun()
-                    except Exception:
-                        pass
+            filt = projections.copy()
+            if pos != "All" and "position" in filt.columns:
+                filt = filt[filt["position"] == pos]
+            if club != "All" and "team" in filt.columns:
+                filt = filt[filt["team"] == club]
+            if "price" in filt.columns:
+                filt = filt[(filt["price"] >= float(price_min)) & (filt["price"] <= float(price_max))]
 
-        if team_df.empty:
-            st.info("Add players on the right to build a squad.")
+            view = build_key_stats_view(filt)
+            st.dataframe(view.head(300), width="stretch")
+
+    # Tab: Fixture ticker
+    with tabs[2]:
+        st.subheader("Fixture Difficulty Ticker")
+        if fixtures.empty:
+            st.warning("No fixtures data available (data/fixtures.json)")
         else:
-            summary = team_summary(team_df)
-            st.metric("Team Cost", f"${summary['cost']:.1f}")
-            st.metric("Budget Remaining", f"${max(0.0, BUDGET - summary['cost']):.1f}")
-            st.write(
-                f"Positions: GK {summary['counts'].get('GK',0)}/2 · DEF {summary['counts'].get('DEF',0)}/5 · "
-                f"MID {summary['counts'].get('MID',0)}/5 · FWD {summary['counts'].get('FWD',0)}/3"
-            )
+            if "event" not in fixtures.columns:
+                st.warning("Fixtures file isn't in event format (missing 'event').")
+            else:
+                gw_min = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().min())
+                gw_max = int(pd.to_numeric(fixtures["event"], errors="coerce").dropna().max())
 
-            # Transfer/hits calculator (vs imported baseline)
-            base_ids = set(int(x) for x in st.session_state.get("tp_base_team_ids", []))
-            cur_ids = set(int(x) for x in team_df.get("player_id", pd.Series(dtype=int)).dropna().astype(int).tolist())
-            transfers_made = max(0, len(base_ids - cur_ids)) if base_ids and cur_ids else 0
-            free_transfers = st.selectbox("Free transfers available", options=[1, 2], index=0, key="tp_free_transfers")
-            hits = max(0, transfers_made - int(free_transfers))
-            c_a, c_b, c_c = st.columns(3)
-            with c_a:
-                st.metric("Transfers Made", f"{transfers_made}")
-            with c_b:
-                st.metric("Free Transfers", f"{int(free_transfers)}")
-            with c_c:
-                st.metric("Points Deduction", f"-{hits * 4}")
+                if gw_min > gw_max:
+                    st.warning("Invalid or empty fixture data.")
+                    st.stop()
 
-            starters_ids = [int(x) for x in st.session_state.get("tp_starters_ids", [])]
-            bench_ids = [int(x) for x in st.session_state.get("tp_bench_ids", [])]
+                if gw_min == gw_max:
+                    gw_start, gw_end = gw_min, gw_max
+                else:
+                    gw_start, gw_end = st.slider(
+                        "Gameweek Range",
+                        min_value=gw_min,
+                        max_value=gw_max,
+                        value=(gw_min, gw_max),
+                    )
 
-            if len(starters_ids) != 11 and len(team_df) >= 11:
-                starters_ids = best_xi_ids(team_df)
-                bench_ids = [
+                teams = load_team_lookup()
+                team_opts = [teams[k].get("short_name") for k in sorted(teams.keys())]
+                selected = st.multiselect("Filter by team(s)", options=team_opts, default=[])
+                selected_ids = None
+                if selected:
+                    inv = {v.get("short_name"): k for k, v in teams.items()}
+                    selected_ids = {int(inv[s]) for s in selected if s in inv}
+
+                fixtures_idx = _build_fixture_index(fixtures)
+                html = _render_ticker_html(fixtures_idx, int(gw_start), int(gw_end), selected_ids)
+                st.markdown(html, unsafe_allow_html=True)
+
+    # Tab: Key Stats (requested to show projections file)
+    with tabs[3]:
+        st.subheader("Key Stats")
+        if projections.empty:
+            st.info("No projections available.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            per_90 = c1.toggle("Show box stats per 90", value=False)
+            show_uncertainty = c2.toggle("Show P10/P50/P90", value=False)
+            full_names = c3.toggle("Use full column names", value=False)
+
+            with st.expander("What do these columns mean?"):
+                glossary = pd.DataFrame(
+                    {"Column": list(STAT_GLOSSARY.keys()), "Description": list(STAT_GLOSSARY.values())}
+                )
+                st.dataframe(glossary, width="stretch", hide_index=True)
+
+            q = st.text_input("Search player or club")
+            df_stats = projections.copy()
+            if q and "web_name" in df_stats.columns:
+                name_match = df_stats["web_name"].astype(str).str.contains(q, case=False, na=False)
+                team_match = df_stats.get("team", pd.Series(dtype=str)).astype(str).str.contains(q, case=False, na=False)
+                df_stats = df_stats[name_match | team_match]
+
+            if show_uncertainty or full_names:
+                st.caption("Note: the clean stats view ignores P10/P50/P90 and full-name mapping.")
+
+            view = build_clean_playerstats_view(df_stats, per_90=per_90)
+            st.dataframe(view, width="stretch", hide_index=True)
+
+    # Tab: Player profile
+    with tabs[4]:
+        st.subheader("Player Profile")
+        st.markdown("### Player directory & filters")
+
+        teams = sorted(projections["team"].unique()) if (not projections.empty and "team" in projections.columns) else []
+        positions = sorted(projections["position"].unique()) if (not projections.empty and "position" in projections.columns) else []
+        price_opts = price_options_from_proj(projections)
+
+        pf_team = st.selectbox("Team", options=["ALL"] + teams)
+        pf_pos = st.selectbox("Position", options=["ALL"] + positions)
+        pf_min = st.selectbox("Min price", options=price_opts, index=0)
+        pf_max = st.selectbox("Max price", options=price_opts, index=len(price_opts) - 1)
+
+        pf_df = projections.copy()
+        if pf_team != "ALL":
+            pf_df = pf_df[pf_df["team"] == pf_team]
+        if pf_pos != "ALL":
+            pf_df = pf_df[pf_df["position"] == pf_pos]
+        if "price" in pf_df.columns:
+            pf_df = pf_df[(pf_df["price"] >= float(pf_min)) & (pf_df["price"] <= float(pf_max))]
+
+        display_cols = [c for c in ["web_name", "team", "position", "price", "proj_points"] if c in pf_df.columns]
+        st.dataframe(pf_df[display_cols].head(200), width="stretch")
+
+        if not pf_df.empty and "web_name" in pf_df.columns:
+            sel = st.selectbox("Choose player for details", options=pf_df["web_name"].unique())
+            if sel:
+                p = pf_df[pf_df["web_name"] == sel].iloc[0]
+                st.markdown(
+                    f"### {p.get('web_name')} — {p.get('team','')} · {p.get('position','')} · £{p.get('price',0):.1f}m"
+                )
+
+                cols = st.columns([1, 1, 1])
+                with cols[1]:
+                    st.metric("Median Pred", f"{p.get('p50', p.get('proj_points',0)):.1f}")
+                    st.metric("Minutes Prob", f"{int(round(p.get('minutes_prob',0)*100))}%")
+                with cols[2]:
+                    st.metric("Upside (P90)", f"{p.get('p90',0):.1f}")
+                    st.metric("Downside (P10)", f"{p.get('p10',0):.1f}")
+
+    # Tab: Transfer Planner (kept close to your original)
+    with tabs[5]:
+        st.subheader("Transfer Planner")
+        st.caption("Squad rules enforced: £100.0m budget · Max 3 per club · 2 GK / 5 DEF / 5 MID / 3 FWD (15 total)")
+
+        try:
+
+            if "team_ids" not in st.session_state:
+                st.session_state.team_ids = []
+            if "tp_starters_ids" not in st.session_state:
+                st.session_state.tp_starters_ids = []
+            if "tp_bench_ids" not in st.session_state:
+                st.session_state.tp_bench_ids = []
+
+            if st.session_state.team_ids and not projections.empty:
+                team_df = projections[projections["player_id"].astype(int).isin([int(x) for x in st.session_state.team_ids])].copy()
+            else:
+                team_df = projections.head(0).copy() if not projections.empty else pd.DataFrame()
+
+            if not team_df.empty and len(team_df) >= 11 and (not st.session_state.tp_starters_ids):
+                starters = _best_xi_ids(team_df)
+                st.session_state.tp_starters_ids = starters
+                st.session_state.tp_bench_ids = [
                     int(x)
                     for x in team_df["player_id"].astype(int).tolist()
-                    if int(x) not in set(int(s) for s in starters_ids)
+                    if int(x) not in set(int(s) for s in starters)
                 ]
 
-            st.session_state.tp_starters_ids = starters_ids
-            st.session_state.tp_bench_ids = bench_ids
+            def _remove_from_planner(pid: int):
+                st.session_state.team_ids = [x for x in st.session_state.team_ids if int(x) != int(pid)]
+                st.session_state.tp_starters_ids = [x for x in st.session_state.tp_starters_ids if int(x) != int(pid)]
+                st.session_state.tp_bench_ids = [x for x in st.session_state.tp_bench_ids if int(x) != int(pid)]
 
-            ok, msg, formation = validate_starting_xi(team_df, starters_ids) if len(starters_ids) == 11 else (False, "Pick 11 starters", None)
-            if ok and formation:
-                st.success(f"Formation: {formation}")
-            elif msg and len(starters_ids) != 11:
-                st.warning(msg)
+            left, right = st.columns([1.3, 1.0], gap="large")
+            with left:
+                starters_ids = [int(x) for x in st.session_state.get("tp_starters_ids", [])]
+                bench_ids = [int(x) for x in st.session_state.get("tp_bench_ids", [])]
 
-            st.markdown("**Starting XI**")
-            starters_df = team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy() if starters_ids else team_df.head(0)
-            st.dataframe(starters_df[[c for c in ["web_name", "team", "position", "price", "proj_points"] if c in starters_df.columns]], width="stretch")
+                if not team_df.empty and len(team_df) >= 11 and len(starters_ids) != 11:
+                    starters_ids = _best_xi_ids(team_df)
+                    bench_ids = [
+                        int(x)
+                        for x in team_df["player_id"].astype(int).tolist()
+                        if int(x) not in set(int(s) for s in starters_ids)
+                    ]
 
-            st.markdown("**Bench**")
-            bench_df = team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy() if bench_ids else team_df.head(0)
-            st.dataframe(bench_df[[c for c in ["web_name", "team", "position", "price", "proj_points"] if c in bench_df.columns]], width="stretch")
+                starters_ids, bench_ids = _render_interactive_cards(
+                    title="Transfer Planner lineup",
+                    team_df=team_df,
+                    starters_ids=starters_ids,
+                    bench_ids=bench_ids,
+                    state_prefix="tp",
+                    allow_remove=True,
+                    on_remove_player=_remove_from_planner,
+                )
+                st.session_state.tp_starters_ids = starters_ids
+                st.session_state.tp_bench_ids = bench_ids
 
-            st.markdown("**Remove players**")
-            for _, r in team_df.sort_values("proj_points", ascending=False).iterrows():
-                pid = int(r.get("player_id")) if pd.notna(r.get("player_id")) else None
-                if pid is None:
-                    continue
+                starters_df = (
+                    team_df[team_df["player_id"].astype(int).isin(starters_ids)].copy() if not team_df.empty else pd.DataFrame()
+                )
+                bench_df = (
+                    team_df[team_df["player_id"].astype(int).isin(bench_ids)].copy() if not team_df.empty else pd.DataFrame()
+                )
+                st.markdown(_render_pitch_html(starters_df, bench_df), unsafe_allow_html=True)
 
-                can_rm, reason = can_remove_from_squad(team_df, pid)
+                summary = _team_summary(team_df)
+                st.metric("Team Cost", f"£{summary['cost']:.1f}m")
+                st.write(
+                    f"Positions: GK {summary['counts'].get('GK',0)}/2 · DEF {summary['counts'].get('DEF',0)}/5 · "
+                    f"MID {summary['counts'].get('MID',0)}/5 · FWD {summary['counts'].get('FWD',0)}/3"
+                )
 
-                cols = st.columns([0.8, 0.8, 2, 0.8, 0.8, 0.8, 0.6])
-                with cols[0]:
-                    team_code = r.get("team_code", 0)
-                    if pd.notna(team_code) and int(team_code) > 0:
-                        st.image(get_shirt_url(int(team_code)), width=40)
-                with cols[1]:
-                    st.image(get_player_photo_url(int(pid)), width=40)
-                with cols[2]:
-                    st.write(r.get("web_name", ""))
-                with cols[3]:
-                    st.caption(r.get("team", ""))
-                with cols[4]:
-                    st.caption(r.get("position", ""))
-                with cols[5]:
-                    st.caption(f"£{float(r.get('price',0) or 0):.1f}")
-                with cols[6]:
-                    if st.button("✕", key=f"tp_remove_{pid}", disabled=not can_rm, help=(reason if not can_rm else "Remove")):
-                        _remove_from_planner(pid)
-                        st.rerun()
+            with right:
+                st.markdown("**Player filters**")
+                q = st.text_input("Search", value="")
+                fpos = st.radio("Position", options=["ALL", "GK", "DEF", "MID", "FWD"], horizontal=True)
+                price_opts = price_options_from_proj(projections)
+                pmin, pmax = st.select_slider("Price", options=price_opts, value=(price_opts[0], price_opts[-1]))
+                teams = (
+                    sorted(projections["team"].dropna().unique().tolist())
+                    if (not projections.empty and "team" in projections.columns)
+                    else []
+                )
+                fteams = st.multiselect("Filter by club(s)", options=teams, default=[])
 
-    with right:
-        st.subheader("Add players")
-        q = st.text_input("Search", value="")
-        fpos = st.radio("Position", options=["ALL", "GK", "DEF", "MID", "FWD"], horizontal=True)
-        price_opts = price_options_from_proj(projections)
-        pmin, pmax = st.select_slider("Price", options=price_opts, value=(price_opts[0], price_opts[-1]))
+                cand = projections.copy()
+                if q:
+                    cand = cand[
+                        cand["web_name"].astype(str).str.contains(q, case=False, na=False)
+                        | cand.get("team", "").astype(str).str.contains(q, case=False, na=False)
+                    ]
+                if fpos != "ALL":
+                    cand = cand[cand["position"] == fpos]
+                cand = cand[(cand["price"] >= float(pmin)) & (cand["price"] <= float(pmax))]
+                if fteams:
+                    cand = cand[cand["team"].isin(fteams)]
+                cand = cand.sort_values("proj_points", ascending=False)
 
-        team_opts = sorted([t for t in projections.get("team", pd.Series(dtype=str)).dropna().unique().tolist()])
-        fteams = st.multiselect("Filter by team(s)", options=team_opts, default=[])
+                st.markdown("**Top players**")
+                for _, r in cand.head(25).iterrows():
+                    ok, reason = _can_add_player(team_df, r)
+                    pid = int(r.get("player_id"))
+                    name = r.get("web_name")
+                    team = r.get("team")
+                    pos = r.get("position")
+                    price = float(r.get("price", 0) or 0)
+                    proj = float(r.get("proj_points", 0) or 0)
 
-        cand = projections.copy()
-        if q:
-            cand = cand[
-                cand.get("web_name", "").astype(str).str.contains(q, case=False, na=False)
-                | cand.get("team", "").astype(str).str.contains(q, case=False, na=False)
-            ]
-        if fpos != "ALL" and "position" in cand.columns:
-            cand = cand[cand["position"].astype(str) == fpos]
-        if "price" in cand.columns:
-            cand = cand[(cand["price"] >= float(pmin)) & (cand["price"] <= float(pmax))]
-        if fteams and "team" in cand.columns:
-            cand = cand[cand["team"].isin(fteams)]
-
-        cand = cand.sort_values("proj_points", ascending=False)
-
-        st.markdown("**Top players**")
-        for _, r in cand.head(25).iterrows():
-            ok, reason = can_add_player(team_df, r)
-            pid = r.get("player_id")
-            try:
-                pid_int = int(pid) if pd.notna(pid) else None
-            except Exception:
-                pid_int = None
-
-            name = r.get("web_name")
-            team = r.get("team")
-            pos = r.get("position")
-            price = float(r.get("price", 0) or 0)
-            proj = float(r.get("proj_points", 0) or 0)
-
-            c1, c2 = st.columns([4, 1])
-            with c1:
-                st.write(f"{name} — {team} · {pos} · ${price:.1f} · Pred {proj:.1f}")
-                if reason and not ok:
-                    st.caption(reason)
-            with c2:
-                if st.button("Add", key=f"tp_add_{pid_int or name}", disabled=(not ok) or (pid_int is None)):
-                    st.session_state.team_ids = [*st.session_state.team_ids, int(pid_int)]
-                    st.rerun()
-
-
-with tab6:
-    st.header("🎯 Differential Finder")
-    st.caption("High projection + low ownership = competitive edge")
-
-    if projections.empty:
-        st.info("No projections loaded")
-    elif "proj_points" not in projections.columns or "price" not in projections.columns:
-        st.info("Projections are missing required columns")
-    elif "selected_by_percent" not in projections.columns:
-        st.warning("Ownership (selected_by_percent) not available in projections")
-    else:
-        min_proj = st.slider("Min projection", 2.0, 20.0, 5.0)
-        max_own = st.slider("Max ownership %", 0.0, 50.0, 5.0)
-
-        proj_pts = pd.to_numeric(projections["proj_points"], errors="coerce").fillna(0.0)
-        own = pd.to_numeric(projections["selected_by_percent"], errors="coerce").fillna(0.0)
-        price = pd.to_numeric(projections["price"], errors="coerce").replace(0, pd.NA)
-
-        diffs = projections[(proj_pts > float(min_proj)) & (own < float(max_own))].copy()
-        if not diffs.empty:
-            diffs["value"] = pd.to_numeric(diffs["proj_points"], errors="coerce").fillna(0.0) / pd.to_numeric(diffs["price"], errors="coerce").replace(0, pd.NA)
-            diffs = diffs.sort_values("value", ascending=False).head(30)
-
-            disp_cols = [
-                c
-                for c in [
-                    "web_name",
-                    "team",
-                    "position",
-                    "price",
-                    "proj_points",
-                    "selected_by_percent",
-                    "value",
-                ]
-                if c in diffs.columns
-            ]
-            st.dataframe(diffs[disp_cols], width="stretch")
-        else:
-            st.info("No differentials found with current filters")
-
-
-with tab7:
-    st.header("📉 Player Performance Analysis")
-    st.caption("GW-by-GW history from the official FPL element-summary endpoint")
-
-    if projections.empty or "player_id" not in projections.columns:
-        st.info("No players available")
-    else:
-        player_opts = projections[[c for c in ["player_id", "web_name", "team", "position"] if c in projections.columns]].dropna(subset=["player_id"]).copy()
-        if "web_name" not in player_opts.columns:
-            st.info("Missing player names in projections")
-        else:
-            player_opts["player_id"] = pd.to_numeric(player_opts["player_id"], errors="coerce").astype("Int64")
-            player_opts = player_opts.dropna(subset=["player_id"]).drop_duplicates(subset=["player_id"]).copy()
-            player_opts["display"] = player_opts["web_name"].astype(str) + " (" + player_opts.get("team", "").astype(str) + ")"
-
-            selected = st.selectbox("Select Player", options=player_opts["display"].tolist())
-
-            if selected:
-                pid = int(player_opts[player_opts["display"] == selected]["player_id"].iloc[0])
-                pname = selected.split(" (")[0]
-
-                history = fetch_player_history(pid)
-                if not history.empty:
-                    c1, c2, c3 = st.columns(3)
+                    c1, c2 = st.columns([4, 1])
                     with c1:
-                        st.metric("Season Pts", int(pd.to_numeric(history.get("total_points", 0), errors="coerce").fillna(0).sum()))
+                        badge = r.get("badge")
+                        badge_html = ""
+                        try:
+                            if badge and Path(str(badge)).exists():
+                                badge_html = f"<img src='{badge}' style='width:26px;height:26px;vertical-align:-6px;margin-right:8px'/>"
+                        except Exception:
+                            badge_html = ""
+
+                        st.markdown(
+                            "<div style='background:#fff;border:1px solid #eee;border-radius:12px;padding:10px 12px;margin-bottom:10px'>"
+                            f"<div style='display:flex;justify-content:space-between;align-items:center'>"
+                            f"<div style='font-weight:800;font-size:15px'>{badge_html}{name} <span style='color:#999;font-weight:600;font-size:12px'>({team} · {pos})</span></div>"
+                            f"<div style='color:#111;font-weight:800'>Pred {proj:.1f}</div>"
+                            "</div>"
+                            f"<div style='margin-top:6px;color:#444;font-size:12px'>£{price:.1f}m</div>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+
                     with c2:
-                        st.metric("Avg/GW", f"{pd.to_numeric(history.get('total_points', 0), errors='coerce').fillna(0).mean():.1f}")
-                    with c3:
-                        st.metric("Minutes", int(pd.to_numeric(history.get("minutes", 0), errors="coerce").fillna(0).sum()))
+                        if st.button("Add", key=f"add_{pid}", disabled=not ok):
+                            st.session_state.team_ids = [*st.session_state.team_ids, pid]
+                            st.rerun()
+                        if not ok and reason:
+                            st.caption(reason)
 
-                    st.plotly_chart(create_points_chart(history, pname), width="stretch")
-                else:
-                    st.warning(f"No history for {pname}")
+        except Exception:
+            st.info("🔜 Advanced transfer planning tool coming soon!")
 
-st.markdown("---")
-st.caption("📊 Data from FPL API | ⚡ Powered by Machine Learning")
+
+if __name__ == "__main__":
+    main()
