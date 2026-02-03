@@ -7,9 +7,9 @@
   },
   "report": [
     {
-      "count": 26,
-      "mae_after": 4.717439903416681,
-      "mae_before": 4.832165563839845,
+      "count": 27,
+      "mae_after": 4.687341328258276,
+      "mae_before": 4.796850732265595,
       "multiplier": 1.06,
       "role": "MID_AM"
     }
