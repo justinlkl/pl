@@ -3,14 +3,14 @@
     "fitted_on": "test_window"
   },
   "overrides": {
-    "MID_AM": 0.77
+    "MID_AM": 0.79
   },
   "report": [
     {
       "count": 33,
-      "mae_after": 6.678393880609327,
-      "mae_before": 7.318189267137514,
-      "multiplier": 0.77,
+      "mae_after": 6.051280142602087,
+      "mae_before": 6.850395525496522,
+      "multiplier": 0.79,
       "role": "MID_AM"
     }
   ]
