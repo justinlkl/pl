@@ -8,8 +8,8 @@
   "report": [
     {
       "count": 33,
-      "mae_after": 4.050838461076039,
-      "mae_before": 4.1220077353319615,
+      "mae_after": 4.048151674511827,
+      "mae_before": 4.1184211931972845,
       "multiplier": 0.9099999999999999,
       "role": "MID_AM"
     }
